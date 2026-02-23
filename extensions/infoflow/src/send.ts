@@ -3,7 +3,7 @@
  * Supports both private (DM) and group chat messages.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { recordSentMessageId } from "./infoflow-req-parse.js";
@@ -272,7 +272,7 @@ export async function sendInfoflowPrivateMessage(params: {
     const headers = {
       Authorization: `Bearer-${tokenResult.token}`,
       "Content-Type": "application/json; charset=utf-8",
-      LOGID: String(Date.now() * 1000 + Math.floor(Math.random() * 1000)),
+      LOGID: randomUUID(),
     };
 
     const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_PRIVATE_SEND_PATH}`, {

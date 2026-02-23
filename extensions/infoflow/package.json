@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/infoflow",
-  "version": "2026.2.18",
+  "version": "2026.2.23",
   "description": "OpenClaw Infoflow channel plugin",
   "type": "module",
   "devDependencies": {

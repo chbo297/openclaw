@@ -3,9 +3,7 @@
   "version": "2026.2.23",
   "description": "OpenClaw Infoflow channel plugin",
   "type": "module",
-  "devDependencies": {
-    "openclaw": "workspace:*"
-  },
+  "devDependencies": {},
   "openclaw": {
     "extensions": [
       "./index.ts"

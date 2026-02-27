@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { _checkBotMentioned as checkBotMentioned } from "./bot.js";
+import { _checkBotMentioned as checkBotMentioned, _checkWatchMentioned as checkWatchMentioned } from "./bot.js";
 
 describe("checkBotMentioned", () => {
   // Case 1: Missing robotName should return false
@@ -97,5 +97,68 @@ describe("checkBotMentioned", () => {
   it("returns false when robotName is substring of AT name", () => {
     const bodyItems = [{ type: "AT", name: "Bot" }];
     expect(checkBotMentioned(bodyItems, "MyBot")).toBe(false);
+  });
+});
+
+describe("checkWatchMentioned", () => {
+  it("returns undefined when watchMentions is empty", () => {
+    const bodyItems = [{ type: "AT", name: "Alice" }];
+    expect(checkWatchMentioned(bodyItems, [])).toBeUndefined();
+  });
+
+  it("returns undefined when body is empty", () => {
+    expect(checkWatchMentioned([], ["Alice"])).toBeUndefined();
+  });
+
+  it("returns matched name on exact match", () => {
+    const bodyItems = [{ type: "AT", name: "Alice" }];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBe("Alice");
+  });
+
+  it("matches case-insensitively", () => {
+    const bodyItems = [{ type: "AT", name: "alice" }];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBe("alice");
+  });
+
+  it("matches case-insensitively (uppercase input)", () => {
+    const bodyItems = [{ type: "AT", name: "ALICE" }];
+    expect(checkWatchMentioned(bodyItems, ["alice"])).toBe("ALICE");
+  });
+
+  it("returns undefined when no watch names are mentioned", () => {
+    const bodyItems = [{ type: "AT", name: "Bob" }];
+    expect(checkWatchMentioned(bodyItems, ["Alice", "Charlie"])).toBeUndefined();
+  });
+
+  it("returns first match when multiple watch names are present", () => {
+    const bodyItems = [
+      { type: "AT", name: "Bob" },
+      { type: "AT", name: "Alice" },
+      { type: "AT", name: "Charlie" },
+    ];
+    expect(checkWatchMentioned(bodyItems, ["Alice", "Charlie"])).toBe("Alice");
+  });
+
+  it("ignores non-AT items", () => {
+    const bodyItems = [
+      { type: "TEXT", content: "Alice" },
+      { type: "LINK", label: "Alice" },
+    ];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBeUndefined();
+  });
+
+  it("returns undefined when AT item has no name", () => {
+    const bodyItems = [{ type: "AT", robotid: 123 }];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBeUndefined();
+  });
+
+  it("returns undefined when AT item has empty name", () => {
+    const bodyItems = [{ type: "AT", name: "" }];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBeUndefined();
+  });
+
+  it("does not match partial names", () => {
+    const bodyItems = [{ type: "AT", name: "AliceSmith" }];
+    expect(checkWatchMentioned(bodyItems, ["Alice"])).toBeUndefined();
   });
 });

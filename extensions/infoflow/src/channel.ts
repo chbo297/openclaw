@@ -15,7 +15,7 @@ import {
   resolveDefaultInfoflowAccountId,
   resolveInfoflowAccount,
 } from "./accounts.js";
-import { getInfoflowSendLog } from "./logging.js";
+import { logVerbose } from "./logging.js";
 import { startInfoflowMonitor } from "./monitor.js";
 import { getInfoflowRuntime } from "./runtime.js";
 import { sendInfoflowMessage } from "./send.js";
@@ -200,10 +200,7 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
     textChunkLimit: 4000,
     chunker: (text, limit) => getInfoflowRuntime().channel.text.chunkText(text, limit),
     sendText: async ({ cfg, to, text, accountId }) => {
-      const verbose = getInfoflowRuntime().logging.shouldLogVerbose();
-      if (verbose) {
-        getInfoflowSendLog().debug?.(`[infoflow:sendText] to=${to}, accountId=${accountId}`);
-      }
+      logVerbose(`[infoflow:sendText] to=${to}, accountId=${accountId}`);
       // Use "markdown" type even though param is named `text`: LLM outputs are often markdown,
       // and Infoflow's markdown type handles both plain text and markdown seamlessly.
       const result = await sendInfoflowMessage({
@@ -218,12 +215,7 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
       };
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId }) => {
-      const verbose = getInfoflowRuntime().logging.shouldLogVerbose();
-      if (verbose) {
-        getInfoflowSendLog().debug?.(
-          `[infoflow:sendMedia] to=${to}, accountId=${accountId}, mediaUrl=${mediaUrl}`,
-        );
-      }
+      logVerbose(`[infoflow:sendMedia] to=${to}, accountId=${accountId}, mediaUrl=${mediaUrl}`);
 
       // Build contents array: text (if provided) + link for media URL
       const contents: InfoflowMessageContentItem[] = [];

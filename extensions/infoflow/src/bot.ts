@@ -50,6 +50,40 @@ function checkBotMentioned(bodyItems: InfoflowBodyItem[], robotName?: string): b
 }
 
 /**
+ * Check if any name in the watchlist was @mentioned in the message body.
+ * Returns the matched name, or undefined if none matched.
+ */
+function checkWatchMentioned(
+  bodyItems: InfoflowBodyItem[],
+  watchMentions: string[],
+): string | undefined {
+  if (!watchMentions.length) return undefined;
+  const normalized = watchMentions.map((n) => n.toLowerCase());
+  for (const item of bodyItems) {
+    if (item.type === "AT" && item.name) {
+      if (normalized.includes(item.name.toLowerCase())) {
+        return item.name;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build a GroupSystemPrompt for watch-mention triggered messages.
+ * Instructs the agent to reply only when confident, otherwise use NO_REPLY.
+ */
+function buildWatchMentionPrompt(mentionedName: string): string {
+  return [
+    `Someone in this group mentioned @${mentionedName}. You were not directly addressed, but you may be able to help.`,
+    `Evaluate the message carefully:`,
+    `- If you clearly understand the question and have high confidence you can provide a useful, accurate answer, reply helpfully.`,
+    `- If the message is ambiguous, you lack sufficient context, or you are not confident, reply with exactly "NO_REPLY" (nothing else).`,
+    `Err on the side of staying silent — only reply when you can genuinely add value.`,
+  ].join(" ");
+}
+
+/**
  * Handles an incoming private chat message from Infoflow.
  * Receives the raw decrypted message data and dispatches to the agent.
  */
@@ -194,6 +228,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
       wasMentioned,
       messageId: messageIdStr,
       timestamp,
+      bodyItems,
     },
     accountId,
     statusSink,
@@ -302,8 +337,23 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     const canDetectMention = Boolean(account.config.robotName);
     const wasMentioned = event.wasMentioned === true;
 
-    if (requireMention && canDetectMention && !wasMentioned) {
-      return;
+    // When requireMention is enabled, only reply if canDetectMention AND wasMentioned
+    const shouldReply = !requireMention || (canDetectMention && wasMentioned);
+
+    if (!shouldReply) {
+      // Check if someone on the watch list was @mentioned as a fallback
+      const watchMentions = account.config.watchMentions ?? [];
+      const matchedWatchName =
+        watchMentions.length > 0 && event.bodyItems
+          ? checkWatchMentioned(event.bodyItems, watchMentions)
+          : undefined;
+
+      if (!matchedWatchName) {
+        return; // No bot mention, no watch mention -> stay silent
+      }
+
+      // Watch-mention triggered: instruct agent to reply only if confident
+      ctxPayload.GroupSystemPrompt = buildWatchMentionPrompt(matchedWatchName);
     }
   }
 
@@ -316,6 +366,8 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     accountId: account.accountId,
     to,
     statusSink,
+    // @mention the sender back when bot was directly @mentioned in a group
+    atOptions: isGroup && event.wasMentioned ? { atUserIds: [fromuser] } : undefined,
   });
 
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -336,3 +388,6 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
 
 /** @internal — Check if bot was mentioned in message body. Only exported for tests. */
 export const _checkBotMentioned = checkBotMentioned;
+
+/** @internal — Check if any watch-list name was @mentioned. Only exported for tests. */
+export const _checkWatchMentioned = checkWatchMentioned;

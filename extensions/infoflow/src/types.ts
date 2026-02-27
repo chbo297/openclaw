@@ -11,6 +11,19 @@ export type InfoflowGroupPolicy = "open" | "allowlist" | "disabled";
 export type InfoflowChatType = "direct" | "group";
 
 // ---------------------------------------------------------------------------
+// Inbound body item (for @mention detection in received messages)
+// ---------------------------------------------------------------------------
+
+/** Inbound body item from group messages (for @mention detection) */
+export type InfoflowInboundBodyItem = {
+  type?: string;
+  content?: string;
+  label?: string;
+  robotid?: number;
+  name?: string;
+};
+
+// ---------------------------------------------------------------------------
 // AT mention types
 // ---------------------------------------------------------------------------
 
@@ -54,6 +67,9 @@ export type InfoflowAccountConfig = {
   requireMention?: boolean;
   /** Robot name for matching @mentions in group messages */
   robotName?: string;
+  /** Names to watch for @mentions; when someone @mentions a person in this list,
+   *  the bot analyzes the message and replies only if confident. */
+  watchMentions?: string[];
   accounts?: Record<string, InfoflowAccountConfig>;
   defaultAccount?: string;
 };
@@ -78,6 +94,9 @@ export type ResolvedInfoflowAccount = {
     requireMention?: boolean;
     /** Robot name for matching @mentions in group messages */
     robotName?: string;
+    /** Names to watch for @mentions; when someone @mentions a person in this list,
+     *  the bot analyzes the message and replies only if confident. */
+    watchMentions?: string[];
   };
 };
 
@@ -99,6 +118,8 @@ export type InfoflowMessageEvent = {
   timestamp?: number;
   /** Raw message text preserving @mentions (for RawBody) */
   rawMes?: string;
+  /** Raw body items from group message (for watch-mention detection) */
+  bodyItems?: InfoflowInboundBodyItem[];
 };
 
 // ---------------------------------------------------------------------------

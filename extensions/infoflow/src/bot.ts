@@ -1,5 +1,5 @@
 import { resolveInfoflowAccount } from "./accounts.js";
-import { getInfoflowBotLog } from "./logging.js";
+import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
 import { getInfoflowRuntime } from "./runtime.js";
 import type {
@@ -89,8 +89,6 @@ function buildWatchMentionPrompt(mentionedName: string): string {
  */
 export async function handlePrivateChatMessage(params: HandlePrivateChatParams): Promise<void> {
   const { cfg, msgData, accountId, statusSink } = params;
-  const core = getInfoflowRuntime();
-  const verbose = core.logging.shouldLogVerbose();
 
   // Extract sender and content from msgData (flexible field names)
   const fromuser = String(msgData.FromUserId ?? msgData.fromuserid ?? msgData.from ?? "");
@@ -107,13 +105,12 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
   const createTime = msgData.CreateTime ?? msgData.createtime;
   const timestamp = createTime != null ? Number(createTime) * 1000 : Date.now();
 
-  if (verbose) {
-    getInfoflowBotLog().debug?.(
-      `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, raw msgData: ${JSON.stringify(msgData)}`,
-    );
-  }
+  logVerbose(
+    `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, raw msgData: ${JSON.stringify(msgData)}`,
+  );
 
   if (!fromuser || !mes.trim()) {
+    logVerbose(`[infoflow] private chat dropped: empty fromuser or mes, fromuser="${fromuser}"`);
     return;
   }
 
@@ -139,8 +136,6 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
  */
 export async function handleGroupChatMessage(params: HandleGroupChatParams): Promise<void> {
   const { cfg, msgData, accountId, statusSink } = params;
-  const core = getInfoflowRuntime();
-  const verbose = core.logging.shouldLogVerbose();
 
   // Extract sender from nested structure or flat fields
   const header = (msgData.message as Record<string, unknown>)?.header as
@@ -160,13 +155,12 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   const rawTime = msgData.time ?? header?.servertime;
   const timestamp = rawTime != null ? Number(rawTime) : Date.now();
 
-  if (verbose) {
-    getInfoflowBotLog().debug?.(
-      `[infoflow] group chat: fromuser=${fromuser}, groupid=${groupid}, raw msgData: ${JSON.stringify(msgData)}`,
-    );
-  }
+  logVerbose(
+    `[infoflow] group chat: fromuser=${fromuser}, groupid=${groupid}, raw msgData: ${JSON.stringify(msgData)}`,
+  );
 
   if (!fromuser) {
+    logVerbose(`[infoflow] group chat dropped: empty fromuser, groupid=${groupid}`);
     return;
   }
 
@@ -209,6 +203,9 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   const rawMes = rawTextContent.trim() || mes;
 
   if (!mes) {
+    logVerbose(
+      `[infoflow] group chat dropped: empty mes after parsing, fromuser=${fromuser}, groupid=${groupid}`,
+    );
     return;
   }
 
@@ -245,13 +242,10 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
 
   const account = resolveInfoflowAccount({ cfg, accountId });
   const core = getInfoflowRuntime();
-  const verbose = core.logging.shouldLogVerbose();
 
-  if (verbose) {
-    getInfoflowBotLog().debug?.(
-      `[infoflow] handleInfoflowMessage invoked: accountId=${accountId}, chatType=${event.chatType}, fromuser=${event.fromuser}, groupId=${event.groupId}`,
-    );
-  }
+  logVerbose(
+    `[infoflow] handleInfoflowMessage invoked: accountId=${accountId}, chatType=${event.chatType}, fromuser=${event.fromuser}, groupId=${event.groupId}`,
+  );
 
   const isGroup = chatType === "group";
   // Convert groupId (number) to string for peerId since routing expects string
@@ -282,11 +276,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   const fromAddress = isGroup ? `infoflow:group:${groupId}` : `infoflow:${fromuser}`;
   const toAddress = isGroup ? `infoflow:${groupId}` : `infoflow:${account.accountId}`;
 
-  if (verbose) {
-    getInfoflowBotLog().debug?.(
-      `[infoflow] dispatch: chatType=${chatType}, agentId=${route.agentId}`,
-    );
-  }
+  logVerbose(`[infoflow] dispatch: chatType=${chatType}, agentId=${route.agentId}`);
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "Infoflow",
@@ -326,7 +316,9 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
     ctx: ctxPayload,
     onRecordError: (err) => {
-      getInfoflowBotLog().error(`[infoflow] failed updating session meta: ${String(err)}`);
+      getInfoflowBotLog().error(
+        `[infoflow] failed updating session meta (sessionKey=${route.sessionKey}, accountId=${accountId}): ${formatInfoflowError(err)}`,
+      );
     },
   });
 
@@ -349,6 +341,9 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           : undefined;
 
       if (!matchedWatchName) {
+        logVerbose(
+          `[infoflow] group chat skipped: not mentioned, fromuser=${fromuser}, groupId=${groupId}`,
+        );
         return; // No bot mention, no watch mention -> stay silent
       }
 
@@ -377,9 +372,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     replyOptions,
   });
 
-  if (verbose) {
-    getInfoflowBotLog().debug?.(`[infoflow] dispatch complete: ${chatType} from ${fromuser}`);
-  }
+  logVerbose(`[infoflow] dispatch complete: ${chatType} from ${fromuser}`);
 }
 
 // ---------------------------------------------------------------------------

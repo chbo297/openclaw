@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { _checkBotMentioned as checkBotMentioned, _checkWatchMentioned as checkWatchMentioned } from "./bot.js";
+import {
+  _checkBotMentioned as checkBotMentioned,
+  _checkWatchMentioned as checkWatchMentioned,
+} from "./bot.js";
 
 describe("checkBotMentioned", () => {
   // Case 1: Missing robotName should return false

@@ -3,7 +3,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./runtime.js", () => ({
   getInfoflowRuntime: vi.fn(() => ({
-    logging: { shouldLogVerbose: () => false },
+    logging: { shouldLogVerbose: () => false, logVerbose: () => {} },
   })),
 }));
 

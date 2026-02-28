@@ -10,6 +10,23 @@ export type InfoflowDmPolicy = "open" | "pairing" | "allowlist";
 export type InfoflowGroupPolicy = "open" | "allowlist" | "disabled";
 export type InfoflowChatType = "direct" | "group";
 
+/** Reply mode controlling bot behavior per group */
+export type InfoflowReplyMode =
+  | "ignore"
+  | "record"
+  | "mention-only"
+  | "mention-and-watch"
+  | "proactive";
+
+/** Per-group configuration overrides */
+export type InfoflowGroupConfig = {
+  replyMode?: InfoflowReplyMode;
+  watchMentions?: string[];
+  followUp?: boolean;
+  followUpWindow?: number;
+  systemPrompt?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Inbound body item (for @mention detection in received messages)
 // ---------------------------------------------------------------------------
@@ -19,8 +36,20 @@ export type InfoflowInboundBodyItem = {
   type?: string;
   content?: string;
   label?: string;
+  /** 机器人 AT 时有此字段（数字），与 userid 互斥 */
   robotid?: number;
+  /** AT 元素的显示名称 */
   name?: string;
+  /** 人类用户 AT 时有此字段（uuap name），与 robotid 互斥 */
+  userid?: string;
+};
+
+/** Mention IDs extracted from inbound group AT items (excluding the bot itself) */
+export type InfoflowMentionIds = {
+  /** Human user userid list */
+  userIds: string[];
+  /** Robot robotid list (numbers, corresponding to outbound atagentids) */
+  agentIds: number[];
 };
 
 // ---------------------------------------------------------------------------
@@ -39,12 +68,12 @@ export type InfoflowAtOptions = {
 export type InfoflowGroupMessageBodyItem =
   | { type: "TEXT"; content: string }
   | { type: "MD"; content: string }
-  | { type: "AT"; atall?: boolean; atuserids: string[] }
+  | { type: "AT"; atall?: boolean; atuserids: string[]; atagentids?: number[] }
   | { type: "LINK"; href: string };
 
 /** Content item for sendInfoflowMessage */
 export type InfoflowMessageContentItem = {
-  type: "text" | "markdown" | "at" | "link";
+  type: "text" | "markdown" | "at" | "at-agent" | "link";
   content: string;
 };
 
@@ -70,6 +99,14 @@ export type InfoflowAccountConfig = {
   /** Names to watch for @mentions; when someone @mentions a person in this list,
    *  the bot analyzes the message and replies only if confident. */
   watchMentions?: string[];
+  /** Reply mode controlling bot engagement level in groups */
+  replyMode?: InfoflowReplyMode;
+  /** Enable follow-up replies after bot responds to a mention (default: true) */
+  followUp?: boolean;
+  /** Follow-up window in seconds after last bot reply (default: 300) */
+  followUpWindow?: number;
+  /** Per-group configuration overrides, keyed by group ID */
+  groups?: Record<string, InfoflowGroupConfig>;
   accounts?: Record<string, InfoflowAccountConfig>;
   defaultAccount?: string;
 };
@@ -97,6 +134,14 @@ export type ResolvedInfoflowAccount = {
     /** Names to watch for @mentions; when someone @mentions a person in this list,
      *  the bot analyzes the message and replies only if confident. */
     watchMentions?: string[];
+    /** Reply mode controlling bot engagement level in groups */
+    replyMode?: InfoflowReplyMode;
+    /** Enable follow-up replies after bot responds to a mention (default: true) */
+    followUp?: boolean;
+    /** Follow-up window in seconds after last bot reply (default: 300) */
+    followUpWindow?: number;
+    /** Per-group configuration overrides, keyed by group ID */
+    groups?: Record<string, InfoflowGroupConfig>;
   };
 };
 
@@ -120,6 +165,8 @@ export type InfoflowMessageEvent = {
   rawMes?: string;
   /** Raw body items from group message (for watch-mention detection) */
   bodyItems?: InfoflowInboundBodyItem[];
+  /** Non-bot mention IDs extracted from AT items in group messages (excluding bot itself) */
+  mentionIds?: InfoflowMentionIds;
 };
 
 // ---------------------------------------------------------------------------

@@ -52,9 +52,7 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
 
   const deliver = async (payload: ReplyPayload) => {
     const text = payload.text ?? "";
-    logVerbose(
-      `[infoflow] deliver called: to=${to}, textLength=${text.length}`,
-    );
+    logVerbose(`[infoflow] deliver called: to=${to}, text=${text}`);
     if (!text.trim()) {
       return;
     }

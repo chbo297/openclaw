@@ -383,6 +383,15 @@ export async function sendInfoflowGroupMessage(params: {
         const { href } = parseLinkContent(item.content);
         body.push({ type: "LINK", href });
       }
+    } else if (type === "at-agent") {
+      // Robot AT: parse comma-separated numeric IDs into atagentids
+      const agentIds = item.content
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter(Number.isFinite);
+      if (agentIds.length > 0) {
+        body.push({ type: "AT", atuserids: [], atagentids: agentIds });
+      }
     }
   }
 

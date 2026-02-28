@@ -15,6 +15,7 @@ import {
   resolveDefaultInfoflowAccountId,
   resolveInfoflowAccount,
 } from "./accounts.js";
+import { infoflowMessageActions } from "./actions.js";
 import { logVerbose } from "./logging.js";
 import { startInfoflowMonitor } from "./monitor.js";
 import { getInfoflowRuntime } from "./runtime.js";
@@ -45,6 +46,12 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
     nativeCommands: true,
   },
   reload: { configPrefixes: ["channels.infoflow"] },
+  actions: infoflowMessageActions,
+  agentPrompt: {
+    messageToolHints: () => [
+      'Infoflow group @mentions: set atAll=true to @all members, or mentionUserIds="user1,user2" (comma-separated uuapName) to @mention specific users. Only effective for group targets (group:<id>).',
+    ],
+  },
   config: {
     listAccountIds: (cfg) => listInfoflowAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveInfoflowAccount({ cfg, accountId }),

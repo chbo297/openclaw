@@ -45,6 +45,7 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
   capabilities: {
     chatTypes: ["direct", "group"],
     nativeCommands: true,
+    unsend: true,
   },
   reload: { configPrefixes: ["channels.infoflow"] },
   actions: infoflowMessageActions,

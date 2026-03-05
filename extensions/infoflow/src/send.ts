@@ -8,6 +8,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { recordSentMessageId } from "./infoflow-req-parse.js";
 import { getInfoflowSendLog, formatInfoflowError, logVerbose } from "./logging.js";
+import { recordSentMessage, buildMessageDigest } from "./sent-message-store.js";
 import type {
   InfoflowGroupMessageBodyItem,
   InfoflowMessageContentItem,
@@ -35,6 +36,7 @@ export function ensureHttps(apiHost: string): string {
 const INFOFLOW_AUTH_PATH = "/api/v1/auth/app_access_token";
 export const INFOFLOW_PRIVATE_SEND_PATH = "/api/v1/app/message/send";
 export const INFOFLOW_GROUP_SEND_PATH = "/api/v1/robot/msg/groupmsgsend";
+export const INFOFLOW_GROUP_RECALL_PATH = "/api/v1/robot/group/msgRecall";
 
 // Token cache to avoid fetching token for every message
 // Use Map keyed by appKey to support multi-account isolation
@@ -93,6 +95,25 @@ export function extractMessageId(data: Record<string, unknown>): string | undefi
   }
   if (data.msgid != null) {
     return String(data.msgid);
+  }
+
+  return undefined;
+}
+
+/**
+ * Extracts msgseqid from Infoflow group send API response data.
+ * The recall API requires this alongside messageid.
+ */
+export function extractMsgSeqId(data: Record<string, unknown>): string | undefined {
+  // Try nested data.data structure (group message format)
+  const innerData = data.data as Record<string, unknown> | undefined;
+  if (innerData && typeof innerData === "object" && innerData.msgseqid != null) {
+    return String(innerData.msgseqid);
+  }
+
+  // Fallback: flat structure
+  if (data.msgseqid != null) {
+    return String(data.msgseqid);
   }
 
   return undefined;
@@ -316,6 +337,17 @@ export async function sendInfoflowPrivateMessage(params: {
     const msgkey = extractMessageId(innerData ?? {});
     if (msgkey) {
       recordSentMessageId(msgkey);
+      try {
+        recordSentMessage(account.accountId, {
+          target: toUser,
+          messageid: msgkey,
+          msgseqid: "",
+          digest: buildMessageDigest(contents),
+          sentAt: Date.now(),
+        });
+      } catch {
+        // Do not block sending
+      }
     }
 
     return { ok: true, invaliduser: innerData?.invaliduser as string | undefined, msgkey };
@@ -343,7 +375,7 @@ export async function sendInfoflowGroupMessage(params: {
   groupId: number;
   contents: InfoflowMessageContentItem[];
   timeoutMs?: number;
-}): Promise<{ ok: boolean; error?: string; messageid?: string }> {
+}): Promise<{ ok: boolean; error?: string; messageid?: string; msgseqid?: string }> {
   const { account, groupId, contents, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
   const { apiHost, appKey, appSecret } = account.config;
 
@@ -426,7 +458,7 @@ export async function sendInfoflowGroupMessage(params: {
   const postGroupMessage = async (
     msgBody: InfoflowGroupMessageBodyItem[],
     msgtype: string,
-  ): Promise<{ ok: boolean; error?: string; messageid?: string }> => {
+  ): Promise<{ ok: boolean; error?: string; messageid?: string; msgseqid?: string }> => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const controller = new AbortController();
@@ -477,11 +509,12 @@ export async function sendInfoflowGroupMessage(params: {
 
       const nestedData = innerData?.data as Record<string, unknown> | undefined;
       const messageid = extractMessageId(nestedData ?? innerData ?? {});
+      const msgseqid = extractMsgSeqId(nestedData ?? innerData ?? {});
       if (messageid) {
         recordSentMessageId(messageid);
       }
 
-      return { ok: true, messageid };
+      return { ok: true, messageid, msgseqid };
     } catch (err) {
       const errMsg = formatInfoflowError(err);
       getInfoflowSendLog().error(`[infoflow:sendGroup] exception: ${errMsg}`);
@@ -491,7 +524,28 @@ export async function sendInfoflowGroupMessage(params: {
     }
   };
 
+  // Helper: record a successful sub-message to the persistent store
+  const recordToStore = (
+    result: { messageid?: string; msgseqid?: string },
+    digestContents: InfoflowMessageContentItem[],
+  ) => {
+    if (result.messageid) {
+      try {
+        recordSentMessage(account.accountId, {
+          target: `group:${groupId}`,
+          messageid: result.messageid,
+          msgseqid: result.msgseqid ?? "",
+          digest: buildMessageDigest(digestContents),
+          sentAt: Date.now(),
+        });
+      } catch {
+        // Do not block sending
+      }
+    }
+  };
+
   let lastMessageId: string | undefined;
+  let lastMsgSeqId: string | undefined;
   let firstError: string | undefined;
 
   // 1) Send text/AT/MD items together (if any)
@@ -500,6 +554,9 @@ export async function sendInfoflowGroupMessage(params: {
     const result = await postGroupMessage(textItems, msgtype);
     if (result.ok) {
       lastMessageId = result.messageid;
+      lastMsgSeqId = result.msgseqid;
+      const digestItems = contents.filter((c) => !["link", "image"].includes(c.type.toLowerCase()));
+      recordToStore(result, digestItems);
     } else if (!firstError) {
       firstError = result.error;
     }
@@ -510,6 +567,8 @@ export async function sendInfoflowGroupMessage(params: {
     const result = await postGroupMessage([linkItem], "TEXT");
     if (result.ok) {
       lastMessageId = result.messageid;
+      lastMsgSeqId = result.msgseqid;
+      recordToStore(result, [{ type: "link", content: linkItem.href }]);
     } else if (!firstError) {
       firstError = result.error;
     }
@@ -520,15 +579,95 @@ export async function sendInfoflowGroupMessage(params: {
     const result = await postGroupMessage([imageItem], "IMAGE");
     if (result.ok) {
       lastMessageId = result.messageid;
+      lastMsgSeqId = result.msgseqid;
+      recordToStore(result, [{ type: "image", content: "" }]);
     } else if (!firstError) {
       firstError = result.error;
     }
   }
 
   if (firstError) {
-    return { ok: false, error: firstError, messageid: lastMessageId };
+    return { ok: false, error: firstError, messageid: lastMessageId, msgseqid: lastMsgSeqId };
   }
-  return { ok: true, messageid: lastMessageId };
+  return { ok: true, messageid: lastMessageId, msgseqid: lastMsgSeqId };
+}
+
+// ---------------------------------------------------------------------------
+// Group Message Recall (撤回)
+// ---------------------------------------------------------------------------
+
+/**
+ * Recalls (撤回) a group message previously sent by the robot.
+ * Only group messages can be recalled via this API.
+ */
+export async function recallInfoflowGroupMessage(params: {
+  account: ResolvedInfoflowAccount;
+  groupId: number;
+  messageid: number;
+  msgseqid: number;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { account, groupId, messageid, msgseqid, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
+  const { apiHost, appKey, appSecret } = account.config;
+
+  if (!appKey || !appSecret) {
+    return { ok: false, error: "Infoflow appKey/appSecret not configured." };
+  }
+
+  const tokenResult = await getAppAccessToken({ apiHost, appKey, appSecret, timeoutMs });
+  if (!tokenResult.ok || !tokenResult.token) {
+    getInfoflowSendLog().error(`[infoflow:recallGroup] token error: ${tokenResult.error}`);
+    return { ok: false, error: tokenResult.error ?? "failed to get token" };
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    const payload = { groupId, messageid, msgseqid };
+    const bodyStr = JSON.stringify(payload);
+    logVerbose(`[infoflow:recallGroup] POST body: ${bodyStr}`);
+
+    const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_RECALL_PATH}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer-${tokenResult.token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: bodyStr,
+      signal: controller.signal,
+    });
+
+    const data = JSON.parse(await res.text()) as Record<string, unknown>;
+    logVerbose(
+      `[infoflow:recallGroup] response: status=${res.status}, data=${JSON.stringify(data)}`,
+    );
+
+    const code = typeof data.code === "string" ? data.code : "";
+    if (code !== "ok") {
+      const errMsg = String(data.message ?? data.errmsg ?? `code=${code || "unknown"}`);
+      getInfoflowSendLog().error(`[infoflow:recallGroup] failed: ${errMsg}`);
+      return { ok: false, error: errMsg };
+    }
+
+    // Check inner errcode
+    const innerData = data.data as Record<string, unknown> | undefined;
+    const errcode = innerData?.errcode;
+    if (errcode != null && errcode !== 0) {
+      const errMsg = String(innerData?.errmsg ?? `errcode ${errcode}`);
+      getInfoflowSendLog().error(`[infoflow:recallGroup] failed: ${errMsg}`);
+      return { ok: false, error: errMsg };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    const errMsg = formatInfoflowError(err);
+    getInfoflowSendLog().error(`[infoflow:recallGroup] exception: ${errMsg}`);
+    return { ok: false, error: errMsg };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +687,7 @@ export async function sendInfoflowMessage(params: {
   to: string;
   contents: InfoflowMessageContentItem[];
   accountId?: string;
-}): Promise<{ ok: boolean; error?: string; messageId?: string }> {
+}): Promise<{ ok: boolean; error?: string; messageId?: string; msgseqid?: string }> {
   const { cfg, to, contents, accountId } = params;
 
   // Resolve account config
@@ -576,6 +715,7 @@ export async function sendInfoflowMessage(params: {
       ok: result.ok,
       error: result.error,
       messageId: result.messageid,
+      msgseqid: result.msgseqid,
     };
   }
 

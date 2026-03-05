@@ -4,6 +4,7 @@ import {
   DEFAULT_GROUP_HISTORY_LIMIT,
   type HistoryEntry,
   recordPendingHistoryEntryIfEnabled,
+  buildAgentMediaPayload,
 } from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
@@ -43,6 +44,8 @@ type InfoflowBodyItem = {
   name?: string;
   /** 人类用户 AT 时有此字段（uuap name），与 robotid 互斥 */
   userid?: string;
+  /** IMAGE 类型 body item 的图片下载地址 */
+  downloadurl?: string;
 };
 
 /**
@@ -300,12 +303,26 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
   const createTime = msgData.CreateTime ?? msgData.createtime;
   const timestamp = createTime != null ? Number(createTime) * 1000 : Date.now();
 
+  // Detect image messages: MsgType=image with PicUrl
+  const msgType = String(msgData.MsgType ?? msgData.msgtype ?? "");
+  const picUrl = String(msgData.PicUrl ?? msgData.picurl ?? "");
+  const imageUrls: string[] = [];
+  if (msgType === "image" && picUrl.trim()) {
+    imageUrls.push(picUrl.trim());
+  }
+
   logVerbose(
-    `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, mes=${mes}, raw msgData: ${JSON.stringify(msgData)}`,
+    `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, mes=${mes}, msgType=${msgType}, raw msgData: ${JSON.stringify(msgData)}`,
   );
 
-  if (!fromuser || !mes.trim()) {
+  if (!fromuser || (!mes.trim() && imageUrls.length === 0)) {
     return;
+  }
+
+  // For image-only messages (no text), use placeholder
+  let effectiveMes = mes.trim();
+  if (!effectiveMes && imageUrls.length > 0) {
+    effectiveMes = "<media:image>";
   }
 
   // Delegate to the common message handler (private chat)
@@ -313,11 +330,12 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
     cfg,
     event: {
       fromuser,
-      mes,
+      mes: effectiveMes,
       chatType: "direct",
       senderName,
       messageId: messageIdStr,
       timestamp,
+      imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
     },
     accountId,
     statusSink,
@@ -375,6 +393,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   let textContent = "";
   let rawTextContent = "";
   const replyContextItems: string[] = [];
+  const imageUrls: string[] = [];
   if (Array.isArray(bodyItems)) {
     for (const item of bodyItems) {
       if (item.type === "replyData") {
@@ -398,6 +417,12 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
         if (name) {
           rawTextContent += `@${name} `;
         }
+      } else if (item.type === "IMAGE") {
+        // 提取图片下载地址
+        const url = item.downloadurl;
+        if (typeof url === "string" && url.trim()) {
+          imageUrls.push(url.trim());
+        }
       }
     }
   }
@@ -407,8 +432,12 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
 
   const replyContext = replyContextItems.length > 0 ? replyContextItems : undefined;
 
-  if (!mes && !replyContext) {
+  if (!mes && !replyContext && imageUrls.length === 0) {
     return;
+  }
+  // 纯图片消息：设置占位符
+  if (!mes && imageUrls.length > 0) {
+    mes = `<media:image>${imageUrls.length > 1 ? ` (${imageUrls.length} images)` : ""}`;
   }
   // If mes is empty but replyContext exists, use a placeholder so the message is not dropped
   if (!mes && replyContext) {
@@ -435,6 +464,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
       mentionIds:
         mentionIds.userIds.length > 0 || mentionIds.agentIds.length > 0 ? mentionIds : undefined,
       replyContext,
+      imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
     },
     accountId,
     statusSink,
@@ -526,6 +556,40 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
         }))
       : undefined;
 
+  // --- Resolve inbound media (images) ---
+  const INFOFLOW_MAX_IMAGES = 20;
+  const mediaMaxBytes = 30 * 1024 * 1024; // 30MB default, matching Feishu
+  const mediaList: Array<{ path: string; contentType?: string }> = [];
+
+  if (event.imageUrls && event.imageUrls.length > 0) {
+    const urls = event.imageUrls.slice(0, INFOFLOW_MAX_IMAGES);
+    const results = await Promise.allSettled(
+      urls.map(async (imageUrl) => {
+        const fetched = await core.channel.media.fetchRemoteMedia({
+          url: imageUrl,
+          maxBytes: mediaMaxBytes,
+        });
+        const saved = await core.channel.media.saveMediaBuffer(
+          fetched.buffer,
+          fetched.contentType ?? undefined,
+          "inbound",
+          mediaMaxBytes,
+        );
+        logVerbose(`[infoflow] downloaded image from ${imageUrl}, saved to ${saved.path}`);
+        return { path: saved.path, contentType: saved.contentType ?? fetched.contentType };
+      }),
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        mediaList.push(result.value);
+      } else {
+        logVerbose(`[infoflow] failed to download image: ${String(result.reason)}`);
+      }
+    }
+  }
+
+  const mediaPayload = buildAgentMediaPayload(mediaList);
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: combinedBody,
     RawBody: event.rawMes ?? mes,
@@ -549,6 +613,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     ReplyToBody: event.replyContext ? event.replyContext.join("\n---\n") : undefined,
     InboundHistory: inboundHistory,
     CommandAuthorized: true,
+    ...mediaPayload,
   });
 
   // Record session using recordInboundSession for proper session tracking

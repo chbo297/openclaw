@@ -42,6 +42,8 @@ export type InfoflowInboundBodyItem = {
   name?: string;
   /** 人类用户 AT 时有此字段（uuap name），与 robotid 互斥 */
   userid?: string;
+  /** IMAGE 类型 body item 的图片下载地址 */
+  downloadurl?: string;
 };
 
 /** Mention IDs extracted from inbound group AT items (excluding the bot itself) */
@@ -169,6 +171,8 @@ export type InfoflowMessageEvent = {
   mentionIds?: InfoflowMentionIds;
   /** Reply/quote context extracted from replyData body items (supports multiple quotes) */
   replyContext?: string[];
+  /** Image download URLs extracted from IMAGE body items (group) or PicUrl (private) */
+  imageUrls?: string[];
 };
 
 // ---------------------------------------------------------------------------

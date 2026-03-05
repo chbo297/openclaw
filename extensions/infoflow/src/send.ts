@@ -14,13 +14,13 @@ import type {
   ResolvedInfoflowAccount,
 } from "./types.js";
 
-const DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
+export const DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
 
 /**
  * Ensures apiHost uses HTTPS for security (secrets in transit).
  * Allows HTTP only for localhost/127.0.0.1 (local development).
  */
-function ensureHttps(apiHost: string): string {
+export function ensureHttps(apiHost: string): string {
   if (apiHost.startsWith("http://")) {
     const url = new URL(apiHost);
     const isLocal = url.hostname === "localhost" || url.hostname === "127.0.0.1";
@@ -33,8 +33,8 @@ function ensureHttps(apiHost: string): string {
 
 // Infoflow API paths (host is configured via apiHost in config)
 const INFOFLOW_AUTH_PATH = "/api/v1/auth/app_access_token";
-const INFOFLOW_PRIVATE_SEND_PATH = "/api/v1/app/message/send";
-const INFOFLOW_GROUP_SEND_PATH = "/api/v1/robot/msg/groupmsgsend";
+export const INFOFLOW_PRIVATE_SEND_PATH = "/api/v1/app/message/send";
+export const INFOFLOW_GROUP_SEND_PATH = "/api/v1/robot/msg/groupmsgsend";
 
 // Token cache to avoid fetching token for every message
 // Use Map keyed by appKey to support multi-account isolation
@@ -68,7 +68,7 @@ function parseLinkContent(content: string): { href: string; label: string } {
  * - Group: data.data.messageid or data.data.msgid (nested)
  * - Fallback: data.messageid or data.msgid (flat)
  */
-function extractMessageId(data: Record<string, unknown>): string | undefined {
+export function extractMessageId(data: Record<string, unknown>): string | undefined {
   // Try data.msgkey (private message format)
   if (data.msgkey != null) {
     return String(data.msgkey);
@@ -395,10 +395,13 @@ export async function sendInfoflowGroupMessage(params: {
       if (agentIds.length > 0) {
         body.push({ type: "AT", atuserids: [], atagentids: agentIds });
       }
+    } else if (type === "image") {
+      body.push({ type: "IMAGE", content: item.content });
     }
   }
 
-  const headerMsgType = hasMarkdown ? "MD" : "TEXT";
+  const hasImage = body.some((b) => b.type === "IMAGE");
+  const headerMsgType = hasImage ? "IMAGE" : hasMarkdown ? "MD" : "TEXT";
 
   // Get token first
   const tokenResult = await getAppAccessToken({ apiHost, appKey, appSecret, timeoutMs });

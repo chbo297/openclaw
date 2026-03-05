@@ -560,14 +560,32 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   const INFOFLOW_MAX_IMAGES = 20;
   const mediaMaxBytes = 30 * 1024 * 1024; // 30MB default, matching Feishu
   const mediaList: Array<{ path: string; contentType?: string }> = [];
+  const failReasons: string[] = [];
 
   if (event.imageUrls && event.imageUrls.length > 0) {
+    // Collect unique hostnames from image URLs for SSRF allowlist.
+    // Infoflow image servers (e.g. xp2.im.baidu.com, e4hi.im.baidu.com) resolve to
+    // internal IPs on Baidu's network, so they need to be explicitly allowed.
+    const allowedHostnames: string[] = [];
+    for (const imageUrl of event.imageUrls) {
+      try {
+        const hostname = new URL(imageUrl).hostname;
+        if (hostname && !allowedHostnames.includes(hostname)) {
+          allowedHostnames.push(hostname);
+        }
+      } catch {
+        // invalid URL, will fail at fetch time
+      }
+    }
+    const ssrfPolicy = allowedHostnames.length > 0 ? { allowedHostnames } : undefined;
+
     const urls = event.imageUrls.slice(0, INFOFLOW_MAX_IMAGES);
     const results = await Promise.allSettled(
       urls.map(async (imageUrl) => {
         const fetched = await core.channel.media.fetchRemoteMedia({
           url: imageUrl,
           maxBytes: mediaMaxBytes,
+          ssrfPolicy,
         });
         const saved = await core.channel.media.saveMediaBuffer(
           fetched.buffer,
@@ -583,12 +601,40 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
       if (result.status === "fulfilled") {
         mediaList.push(result.value);
       } else {
-        logVerbose(`[infoflow] failed to download image: ${String(result.reason)}`);
+        const reason = String(result.reason);
+        logVerbose(`[infoflow] failed to download image: ${reason}`);
+        failReasons.push(reason);
       }
     }
   }
 
   const mediaPayload = buildAgentMediaPayload(mediaList);
+
+  // If user sent images but some/all downloads failed, adjust the body to inform the LLM.
+  const requestedImageCount = event.imageUrls?.length ?? 0;
+  const downloadedImageCount = mediaList.length;
+  const failedImageCount = requestedImageCount - downloadedImageCount;
+  if (requestedImageCount > 0 && failedImageCount > 0) {
+    // Deduplicate error reasons and truncate for readability
+    const uniqueReasons = [...new Set(failReasons)];
+    const reasonSummary = uniqueReasons.map((r) => r.slice(0, 200)).join("; ");
+
+    if (downloadedImageCount === 0) {
+      // All failed
+      const failNote =
+        `[The user sent ${requestedImageCount > 1 ? `${requestedImageCount} images` : "an image"}, ` +
+        `but failed to load: ${reasonSummary}]`;
+      if (combinedBody.includes("<media:image>")) {
+        combinedBody = combinedBody.replace(/<media:image>(\s*\(\d+ images\))?/, failNote);
+      } else {
+        combinedBody += `\n\n${failNote}`;
+      }
+    } else {
+      // Partial failure: some images loaded, some didn't
+      const failNote = `[${failedImageCount} of ${requestedImageCount} images failed to load: ${reasonSummary}]`;
+      combinedBody += `\n\n${failNote}`;
+    }
+  }
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: combinedBody,

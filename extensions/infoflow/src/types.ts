@@ -71,11 +71,12 @@ export type InfoflowGroupMessageBodyItem =
   | { type: "TEXT"; content: string }
   | { type: "MD"; content: string }
   | { type: "AT"; atall?: boolean; atuserids: string[]; atagentids?: number[] }
-  | { type: "LINK"; href: string };
+  | { type: "LINK"; href: string }
+  | { type: "IMAGE"; content: string };
 
 /** Content item for sendInfoflowMessage */
 export type InfoflowMessageContentItem = {
-  type: "text" | "markdown" | "at" | "at-agent" | "link";
+  type: "text" | "markdown" | "at" | "at-agent" | "link" | "image";
   content: string;
 };
 

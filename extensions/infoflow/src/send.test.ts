@@ -15,7 +15,12 @@ vi.mock("./infoflow-req-parse.js", () => ({
   recordSentMessageId: vi.fn(),
 }));
 
-import { getAppAccessToken, _resetTokenCache } from "./send.js";
+import {
+  getAppAccessToken,
+  _resetTokenCache,
+  extractMsgSeqId,
+  recallInfoflowGroupMessage,
+} from "./send.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -352,5 +357,152 @@ describe("getAppAccessToken", () => {
     });
     const result = await getAppAccessToken(BASE_PARAMS);
     expect(result).toEqual({ ok: false, error: "no token in response" });
+  });
+});
+
+// ============================================================================
+// extractMsgSeqId
+// ============================================================================
+
+describe("extractMsgSeqId", () => {
+  it("extracts msgseqid from nested data.data", () => {
+    expect(extractMsgSeqId({ data: { msgseqid: 300010777 } })).toBe("300010777");
+  });
+
+  it("extracts msgseqid from flat structure", () => {
+    expect(extractMsgSeqId({ msgseqid: 12345 })).toBe("12345");
+  });
+
+  it("returns undefined when msgseqid is absent", () => {
+    expect(extractMsgSeqId({ data: { messageid: "abc" } })).toBeUndefined();
+  });
+
+  it("returns undefined for empty object", () => {
+    expect(extractMsgSeqId({})).toBeUndefined();
+  });
+
+  it("prefers nested over flat", () => {
+    expect(extractMsgSeqId({ msgseqid: 1, data: { msgseqid: 2 } })).toBe("2");
+  });
+});
+
+// ============================================================================
+// recallInfoflowGroupMessage
+// ============================================================================
+
+describe("recallInfoflowGroupMessage", () => {
+  const ACCOUNT = {
+    accountId: "default",
+    enabled: true,
+    configured: true,
+    config: {
+      apiHost: "https://api.example.com",
+      appKey: "test-key",
+      appSecret: "test-secret",
+      checkToken: "tok",
+      encodingAESKey: "aes",
+    },
+  } as never;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("recalls a group message successfully", async () => {
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0 } })),
+    });
+
+    const result = await recallInfoflowGroupMessage({
+      account: ACCOUNT,
+      groupId: 1671623,
+      messageid: 182891542208,
+      msgseqid: 300010777,
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // Verify recall API was called with correct URL and payload
+    const [url, opts] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe("https://api.example.com/api/v1/robot/group/msgRecall");
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body).toEqual({
+      groupId: 1671623,
+      messageid: 182891542208,
+      msgseqid: 300010777,
+    });
+    expect(opts.headers).toMatchObject({
+      Authorization: "Bearer-tok-1",
+      "Content-Type": "application/json; charset=utf-8",
+    });
+  });
+
+  it("returns error on API failure code", async () => {
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ code: "fail", message: "message expired" })),
+    });
+
+    const result = await recallInfoflowGroupMessage({
+      account: ACCOUNT,
+      groupId: 123,
+      messageid: 456,
+      msgseqid: 789,
+    });
+
+    expect(result).toEqual({ ok: false, error: "message expired" });
+  });
+
+  it("returns error on inner errcode", async () => {
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ code: "ok", data: { errcode: 40001, errmsg: "invalid msg" } }),
+        ),
+    });
+
+    const result = await recallInfoflowGroupMessage({
+      account: ACCOUNT,
+      groupId: 123,
+      messageid: 456,
+      msgseqid: 789,
+    });
+
+    expect(result).toEqual({ ok: false, error: "invalid msg" });
+  });
+
+  it("returns error on network failure", async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockTokenResponse("tok-1"))
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+    const result = await recallInfoflowGroupMessage({
+      account: ACCOUNT,
+      groupId: 123,
+      messageid: 456,
+      msgseqid: 789,
+    });
+
+    expect(result).toEqual({ ok: false, error: "ECONNREFUSED" });
+  });
+
+  it("returns error when credentials are missing", async () => {
+    const noCredsAccount = {
+      accountId: "default",
+      config: { apiHost: "https://api.example.com", appKey: "", appSecret: "" },
+    } as never;
+
+    const result = await recallInfoflowGroupMessage({
+      account: noCredsAccount,
+      groupId: 123,
+      messageid: 456,
+      msgseqid: 789,
+    });
+
+    expect(result).toEqual({ ok: false, error: "Infoflow appKey/appSecret not configured." });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

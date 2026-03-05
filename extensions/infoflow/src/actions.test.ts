@@ -30,8 +30,10 @@ vi.mock("./accounts.js", () => ({
 }));
 
 const mockSendInfoflowMessage = vi.hoisted(() => vi.fn());
+const mockRecallInfoflowGroupMessage = vi.hoisted(() => vi.fn());
 vi.mock("./send.js", () => ({
   sendInfoflowMessage: mockSendInfoflowMessage,
+  recallInfoflowGroupMessage: mockRecallInfoflowGroupMessage,
 }));
 
 const mockPrepareInfoflowImageBase64 = vi.hoisted(() => vi.fn());
@@ -39,6 +41,15 @@ const mockSendInfoflowImageMessage = vi.hoisted(() => vi.fn());
 vi.mock("./media.js", () => ({
   prepareInfoflowImageBase64: mockPrepareInfoflowImageBase64,
   sendInfoflowImageMessage: mockSendInfoflowImageMessage,
+}));
+
+const mockFindSentMessage = vi.hoisted(() => vi.fn());
+const mockQuerySentMessages = vi.hoisted(() => vi.fn());
+const mockRemoveRecalledMessages = vi.hoisted(() => vi.fn());
+vi.mock("./sent-message-store.js", () => ({
+  findSentMessage: mockFindSentMessage,
+  querySentMessages: mockQuerySentMessages,
+  removeRecalledMessages: mockRemoveRecalledMessages,
 }));
 
 import { infoflowMessageActions } from "./actions.js";
@@ -51,26 +62,31 @@ describe("infoflowMessageActions", () => {
   beforeEach(() => {
     mockSendInfoflowMessage.mockReset();
     mockSendInfoflowMessage.mockResolvedValue({ ok: true, messageId: "msg-1" });
+    mockRecallInfoflowGroupMessage.mockReset();
+    mockRecallInfoflowGroupMessage.mockResolvedValue({ ok: true });
     mockPrepareInfoflowImageBase64.mockReset();
     mockPrepareInfoflowImageBase64.mockResolvedValue({ isImage: false }); // default: non-image
     mockSendInfoflowImageMessage.mockReset();
     mockSendInfoflowImageMessage.mockResolvedValue({ ok: true, messageId: "img-1" });
+    mockFindSentMessage.mockReset();
+    mockQuerySentMessages.mockReset();
+    mockRemoveRecalledMessages.mockReset();
   });
 
-  it("listActions returns send", () => {
+  it("listActions returns send and delete", () => {
     const actions = infoflowMessageActions.listActions!({ cfg: {} as never });
-    expect(actions).toEqual(["send"]);
+    expect(actions).toEqual(["send", "delete"]);
   });
 
   it("throws for unsupported actions", async () => {
     await expect(
       infoflowMessageActions.handleAction!({
         channel: "infoflow",
-        action: "delete" as never,
+        action: "edit" as never,
         cfg: {} as never,
         params: { to: "group:123", message: "hi" },
       }),
-    ).rejects.toThrow('Action "delete" is not supported for Infoflow.');
+    ).rejects.toThrow('Action "edit" is not supported for Infoflow.');
   });
 
   // -------------------------------------------------------------------------
@@ -435,5 +451,223 @@ describe("infoflowMessageActions", () => {
       contents: [{ type: "markdown", content: "Hello" }],
       accountId: undefined,
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Delete action — Mode A: by messageId
+  // -------------------------------------------------------------------------
+
+  it("recalls a group message with explicit msgseqid", async () => {
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", messageId: "456", msgseqid: "789" },
+    });
+
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith({
+      account: expect.objectContaining({ accountId: "default" }),
+      groupId: 123,
+      messageid: 456,
+      msgseqid: 789,
+    });
+    expect(result).toMatchObject({
+      details: { ok: true, channel: "infoflow", to: "group:123" },
+    });
+    expect(mockRemoveRecalledMessages).toHaveBeenCalledWith("default", ["456"]);
+  });
+
+  it("looks up msgseqid from store when not provided", async () => {
+    mockFindSentMessage.mockReturnValue({
+      target: "group:123",
+      messageid: "456",
+      msgseqid: "789",
+      digest: "hello",
+      sentAt: Date.now(),
+    });
+
+    await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", messageId: "456" },
+    });
+
+    expect(mockFindSentMessage).toHaveBeenCalledWith("default", "456");
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ messageid: 456, msgseqid: 789 }),
+    );
+  });
+
+  it("throws when msgseqid not found in store or params", async () => {
+    mockFindSentMessage.mockReturnValue(undefined);
+
+    await expect(
+      infoflowMessageActions.handleAction!({
+        channel: "infoflow",
+        action: "delete" as never,
+        cfg: {} as never,
+        params: { to: "group:123", messageId: "456" },
+      }),
+    ).rejects.toThrow("delete requires msgseqid");
+  });
+
+  it("throws when delete target is not a group", async () => {
+    await expect(
+      infoflowMessageActions.handleAction!({
+        channel: "infoflow",
+        action: "delete" as never,
+        cfg: {} as never,
+        params: { to: "user1", messageId: "456", msgseqid: "789" },
+      }),
+    ).rejects.toThrow("Infoflow recall is only supported for group messages");
+  });
+
+  it("returns error from recallInfoflowGroupMessage", async () => {
+    mockRecallInfoflowGroupMessage.mockResolvedValue({ ok: false, error: "message expired" });
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", messageId: "456", msgseqid: "789" },
+    });
+
+    expect(result).toMatchObject({
+      details: { ok: false, channel: "infoflow", to: "group:123", error: "message expired" },
+    });
+    // Should NOT remove from store on failure
+    expect(mockRemoveRecalledMessages).not.toHaveBeenCalled();
+  });
+
+  it("normalizes infoflow: prefix for delete target", async () => {
+    await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "infoflow:group:123", messageId: "456", msgseqid: "789" },
+    });
+
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 123 }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Delete action — Mode B: batch recall by count
+  // -------------------------------------------------------------------------
+
+  it("batch recalls messages by count", async () => {
+    mockQuerySentMessages.mockReturnValue([
+      { target: "group:123", messageid: "msg-1", msgseqid: "seq-1", digest: "hello", sentAt: 3000 },
+      { target: "group:123", messageid: "msg-2", msgseqid: "seq-2", digest: "world", sentAt: 2000 },
+    ]);
+    mockRecallInfoflowGroupMessage.mockResolvedValue({ ok: true });
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", count: "5" },
+    });
+
+    expect(mockQuerySentMessages).toHaveBeenCalledWith("default", {
+      target: "group:123",
+      count: 5,
+    });
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledTimes(2);
+    expect(mockRemoveRecalledMessages).toHaveBeenCalledWith("default", ["msg-1", "msg-2"]);
+    expect(result).toMatchObject({
+      details: { ok: true, recalled: 2, failed: 0, total: 2 },
+    });
+  });
+
+  it("skips records without msgseqid in batch mode", async () => {
+    mockQuerySentMessages.mockReturnValue([
+      { target: "group:123", messageid: "msg-1", msgseqid: "seq-1", digest: "hello", sentAt: 3000 },
+      { target: "group:123", messageid: "msg-2", msgseqid: "", digest: "private", sentAt: 2000 },
+    ]);
+    mockRecallInfoflowGroupMessage.mockResolvedValue({ ok: true });
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", count: "10" },
+    });
+
+    // Only msg-1 has msgseqid, so only 1 recall call
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      details: { ok: true, recalled: 1, total: 1 },
+    });
+  });
+
+  it("returns success with 0 recalled when no messages in store", async () => {
+    mockQuerySentMessages.mockReturnValue([]);
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", count: "10" },
+    });
+
+    expect(mockRecallInfoflowGroupMessage).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      details: { ok: true, recalled: 0 },
+    });
+  });
+
+  it("reports partial failures in batch mode", async () => {
+    mockQuerySentMessages.mockReturnValue([
+      { target: "group:123", messageid: "msg-1", msgseqid: "seq-1", digest: "hello", sentAt: 3000 },
+      { target: "group:123", messageid: "msg-2", msgseqid: "seq-2", digest: "world", sentAt: 2000 },
+    ]);
+    mockRecallInfoflowGroupMessage
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, error: "message expired" });
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", count: "5" },
+    });
+
+    expect(result).toMatchObject({
+      details: { ok: false, recalled: 1, failed: 1, total: 2 },
+    });
+    // Only the successful one should be removed from store
+    expect(mockRemoveRecalledMessages).toHaveBeenCalledWith("default", ["msg-1"]);
+  });
+
+  it("throws when neither messageId nor count is provided", async () => {
+    await expect(
+      infoflowMessageActions.handleAction!({
+        channel: "infoflow",
+        action: "delete" as never,
+        cfg: {} as never,
+        params: { to: "group:123" },
+      }),
+    ).rejects.toThrow("delete requires either messageId or count");
+  });
+
+  it("passes accountId through to delete action", async () => {
+    await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123", messageId: "456", msgseqid: "789" },
+      accountId: "my-account",
+    });
+
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        groupId: 123,
+        messageid: 456,
+        msgseqid: 789,
+      }),
+    );
   });
 });

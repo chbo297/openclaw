@@ -11,10 +11,12 @@ import {
   getAppAccessToken,
   ensureHttps,
   extractMessageId,
+  extractMsgSeqId,
   DEFAULT_TIMEOUT_MS,
   INFOFLOW_PRIVATE_SEND_PATH,
   INFOFLOW_GROUP_SEND_PATH,
 } from "./send.js";
+import { recordSentMessage } from "./sent-message-store.js";
 import type { ResolvedInfoflowAccount } from "./types.js";
 
 /** Infoflow API image size limit: 1MB raw bytes */
@@ -207,8 +209,20 @@ export async function sendInfoflowGroupImage(params: {
 
     const nestedData = innerData?.data as Record<string, unknown> | undefined;
     const messageid = extractMessageId(nestedData ?? innerData ?? {});
+    const msgseqid = extractMsgSeqId(nestedData ?? innerData ?? {});
     if (messageid) {
       recordSentMessageId(messageid);
+      try {
+        recordSentMessage(account.accountId, {
+          target: `group:${groupId}`,
+          messageid,
+          msgseqid: msgseqid ?? "",
+          digest: "image",
+          sentAt: Date.now(),
+        });
+      } catch {
+        // Do not block sending
+      }
     }
 
     return { ok: true, messageid };
@@ -284,6 +298,17 @@ export async function sendInfoflowPrivateImage(params: {
     const msgkey = data.msgkey != null ? String(data.msgkey) : undefined;
     if (msgkey) {
       recordSentMessageId(msgkey);
+      try {
+        recordSentMessage(account.accountId, {
+          target: toUser,
+          messageid: msgkey,
+          msgseqid: "",
+          digest: "image",
+          sentAt: Date.now(),
+        });
+      } catch {
+        // Do not block sending
+      }
     }
 
     return { ok: true, msgkey };

@@ -3,7 +3,11 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./runtime.js", () => ({
   getInfoflowRuntime: vi.fn(() => ({
-    logging: { shouldLogVerbose: () => false, logVerbose: () => {} },
+    logging: {
+      shouldLogVerbose: () => false,
+      logVerbose: () => {},
+      getChildLogger: () => ({ error: () => {}, warn: () => {}, info: () => {}, debug: () => {} }),
+    },
   })),
 }));
 
@@ -173,14 +177,17 @@ describe("sendInfoflowMessage", () => {
     });
   });
 
-  it("sends group message with link in body", async () => {
-    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+  it("sends group message with link in body as separate messages", async () => {
+    const mockGroupResponse = (messageid: string) => ({
       ok: true,
       text: () =>
-        Promise.resolve(
-          JSON.stringify({ code: "ok", data: { errcode: 0, data: { messageid: "grp-link-789" } } }),
-        ),
+        Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0, data: { messageid } } })),
     });
+
+    mockFetch
+      .mockResolvedValueOnce(mockTokenResponse("tok-1"))
+      .mockResolvedValueOnce(mockGroupResponse("grp-text-1"))
+      .mockResolvedValueOnce(mockGroupResponse("grp-link-2"));
 
     const result = await sendInfoflowMessage({
       cfg: {} as never,
@@ -192,15 +199,26 @@ describe("sendInfoflowMessage", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.messageId).toBe("grp-link-789");
+    // Returns last messageid
+    expect(result.messageId).toBe("grp-link-2");
+    // 1 token + 2 messages (text + link sent separately)
+    expect(mockFetch).toHaveBeenCalledTimes(3);
 
-    // Verify group message body includes LINK item
-    const [, opts] = mockFetch.mock.calls[1] as [string, RequestInit];
-    const body = JSON.parse(opts.body as string) as { message: { body: unknown[] } };
-    expect(body.message.body).toEqual([
-      { type: "TEXT", content: "Visit:" },
-      { type: "LINK", href: "https://docs.example.com" },
-    ]);
+    // Verify text message sent first
+    const [, textOpts] = mockFetch.mock.calls[1] as [string, RequestInit];
+    const textBody = JSON.parse(textOpts.body as string) as {
+      message: { header: { msgtype: string }; body: unknown[] };
+    };
+    expect(textBody.message.header.msgtype).toBe("TEXT");
+    expect(textBody.message.body).toEqual([{ type: "TEXT", content: "Visit:" }]);
+
+    // Verify link message sent separately
+    const [, linkOpts] = mockFetch.mock.calls[2] as [string, RequestInit];
+    const linkBody = JSON.parse(linkOpts.body as string) as {
+      message: { header: { msgtype: string }; body: unknown[] };
+    };
+    expect(linkBody.message.header.msgtype).toBe("TEXT");
+    expect(linkBody.message.body).toEqual([{ type: "LINK", href: "https://docs.example.com" }]);
   });
 
   it("strips infoflow: prefix from target and routes to private", async () => {

@@ -34,6 +34,13 @@ vi.mock("./send.js", () => ({
   sendInfoflowMessage: mockSendInfoflowMessage,
 }));
 
+const mockPrepareInfoflowImageBase64 = vi.hoisted(() => vi.fn());
+const mockSendInfoflowImageMessage = vi.hoisted(() => vi.fn());
+vi.mock("./media.js", () => ({
+  prepareInfoflowImageBase64: mockPrepareInfoflowImageBase64,
+  sendInfoflowImageMessage: mockSendInfoflowImageMessage,
+}));
+
 import { infoflowMessageActions } from "./actions.js";
 
 // ---------------------------------------------------------------------------
@@ -44,6 +51,10 @@ describe("infoflowMessageActions", () => {
   beforeEach(() => {
     mockSendInfoflowMessage.mockReset();
     mockSendInfoflowMessage.mockResolvedValue({ ok: true, messageId: "msg-1" });
+    mockPrepareInfoflowImageBase64.mockReset();
+    mockPrepareInfoflowImageBase64.mockResolvedValue({ isImage: false }); // default: non-image
+    mockSendInfoflowImageMessage.mockReset();
+    mockSendInfoflowImageMessage.mockResolvedValue({ ok: true, messageId: "img-1" });
   });
 
   it("listActions returns send", () => {
@@ -223,7 +234,9 @@ describe("infoflowMessageActions", () => {
   // Media URL support
   // -------------------------------------------------------------------------
 
-  it("includes media URL as link content", async () => {
+  it("sends media URL as native image when image detected", async () => {
+    mockPrepareInfoflowImageBase64.mockResolvedValue({ isImage: true, base64: "AQIDBA==" });
+
     await infoflowMessageActions.handleAction!({
       channel: "infoflow",
       action: "send",
@@ -231,13 +244,43 @@ describe("infoflowMessageActions", () => {
       params: { to: "group:123", message: "See this", media: "https://example.com/image.png" },
     });
 
+    // Text sent first
     expect(mockSendInfoflowMessage).toHaveBeenCalledWith({
       cfg: {},
       to: "group:123",
-      contents: [
-        { type: "markdown", content: "See this" },
-        { type: "link", content: "https://example.com/image.png" },
-      ],
+      contents: [{ type: "markdown", content: "See this" }],
+      accountId: undefined,
+    });
+    // Then native image
+    expect(mockSendInfoflowImageMessage).toHaveBeenCalledWith({
+      cfg: {},
+      to: "group:123",
+      base64Image: "AQIDBA==",
+      accountId: undefined,
+    });
+  });
+
+  it("falls back to link for non-image media", async () => {
+    // Default mock returns { isImage: false }
+    await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "send",
+      cfg: {} as never,
+      params: { to: "group:123", message: "See this", media: "https://example.com/image.png" },
+    });
+
+    // Text sent first, then link fallback
+    expect(mockSendInfoflowMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendInfoflowMessage).toHaveBeenNthCalledWith(1, {
+      cfg: {},
+      to: "group:123",
+      contents: [{ type: "markdown", content: "See this" }],
+      accountId: undefined,
+    });
+    expect(mockSendInfoflowMessage).toHaveBeenNthCalledWith(2, {
+      cfg: {},
+      to: "group:123",
+      contents: [{ type: "link", content: "https://example.com/image.png" }],
       accountId: undefined,
     });
   });
@@ -250,6 +293,9 @@ describe("infoflowMessageActions", () => {
       params: { to: "group:123", message: "", media: "https://example.com/file.pdf" },
     });
 
+    // No text message sent (empty contents)
+    // Non-image media falls back to link
+    expect(mockSendInfoflowMessage).toHaveBeenCalledTimes(1);
     expect(mockSendInfoflowMessage).toHaveBeenCalledWith({
       cfg: {},
       to: "group:123",
@@ -356,14 +402,21 @@ describe("infoflowMessageActions", () => {
       },
     });
 
-    expect(mockSendInfoflowMessage).toHaveBeenCalledWith({
+    // Text+mentions sent first, then non-image media falls back to link
+    expect(mockSendInfoflowMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendInfoflowMessage).toHaveBeenNthCalledWith(1, {
       cfg: {},
       to: "group:123",
       contents: [
         { type: "at", content: "all" },
         { type: "markdown", content: "@all Check the doc" },
-        { type: "link", content: "https://example.com/doc.pdf" },
       ],
+      accountId: undefined,
+    });
+    expect(mockSendInfoflowMessage).toHaveBeenNthCalledWith(2, {
+      cfg: {},
+      to: "group:123",
+      contents: [{ type: "link", content: "https://example.com/doc.pdf" }],
       accountId: undefined,
     });
   });

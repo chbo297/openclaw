@@ -8,6 +8,7 @@ import type { ChannelMessageActionAdapter, ChannelMessageActionName } from "open
 import { extractToolSend, jsonResult, readStringParam } from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { logVerbose } from "./logging.js";
+import { prepareInfoflowImageBase64, sendInfoflowImageMessage } from "./media.js";
 import { sendInfoflowMessage } from "./send.js";
 import { normalizeInfoflowTarget } from "./targets.js";
 import type { InfoflowMessageContentItem } from "./types.js";
@@ -79,7 +80,51 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
     }
 
     if (mediaUrl) {
-      contents.push({ type: "link", content: mediaUrl });
+      logVerbose(
+        `[infoflow:action:send] to=${to}, atAll=${atAll}, mentionUserIds=${mentionUserIdsRaw ?? "none"}`,
+      );
+
+      // Send text+mentions first (if any)
+      if (contents.length > 0) {
+        await sendInfoflowMessage({ cfg, to, contents, accountId: accountId ?? undefined });
+      }
+
+      // Try native image send, fallback to link
+      try {
+        const prepared = await prepareInfoflowImageBase64({ mediaUrl });
+        if (prepared.isImage) {
+          const imgResult = await sendInfoflowImageMessage({
+            cfg,
+            to,
+            base64Image: prepared.base64,
+            accountId: accountId ?? undefined,
+          });
+          return jsonResult({
+            ok: imgResult.ok,
+            channel: "infoflow",
+            to,
+            messageId: imgResult.messageId ?? (imgResult.ok ? "sent" : "failed"),
+            ...(imgResult.error ? { error: imgResult.error } : {}),
+          });
+        }
+      } catch {
+        // fallback to link below
+      }
+
+      // Non-image or native send failed → send as link
+      const linkResult = await sendInfoflowMessage({
+        cfg,
+        to,
+        contents: [{ type: "link", content: mediaUrl }],
+        accountId: accountId ?? undefined,
+      });
+      return jsonResult({
+        ok: linkResult.ok,
+        channel: "infoflow",
+        to,
+        messageId: linkResult.messageId ?? (linkResult.ok ? "sent" : "failed"),
+        ...(linkResult.error ? { error: linkResult.error } : {}),
+      });
     }
 
     if (contents.length === 0) {

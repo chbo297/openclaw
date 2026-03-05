@@ -400,89 +400,135 @@ export async function sendInfoflowGroupMessage(params: {
     }
   }
 
-  const hasImage = body.some((b) => b.type === "IMAGE");
-  const headerMsgType = hasImage ? "IMAGE" : hasMarkdown ? "MD" : "TEXT";
+  // Split body: LINK and IMAGE must be sent as individual messages
+  const linkItems = body.filter((b) => b.type === "LINK");
+  const imageItems = body.filter((b) => b.type === "IMAGE");
+  const textItems = body.filter((b) => b.type !== "LINK" && b.type !== "IMAGE");
 
-  // Get token first
+  // Get token first (shared by all sends)
   const tokenResult = await getAppAccessToken({ apiHost, appKey, appSecret, timeoutMs });
   if (!tokenResult.ok || !tokenResult.token) {
     getInfoflowSendLog().error(`[infoflow:sendGroup] token error: ${tokenResult.error}`);
     return { ok: false, error: tokenResult.error ?? "failed to get token" };
   }
 
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const controller = new AbortController();
-    timeout = setTimeout(() => controller.abort(), timeoutMs);
+  // NOTE: Infoflow API requires "Bearer-<token>" format (with hyphen, not space).
+  // This is a non-standard format specific to Infoflow service. Do not modify
+  // unless the Infoflow API specification changes.
+  const headers = {
+    Authorization: `Bearer-${tokenResult.token}`,
+    "Content-Type": "application/json",
+  };
 
-    const payload = {
-      message: {
-        header: {
-          toid: groupId,
-          totype: "GROUP",
-          msgtype: headerMsgType,
-          clientmsgid: Date.now(),
-          role: "robot",
+  let msgIndex = 0;
+
+  // Helper: post a single group message payload
+  const postGroupMessage = async (
+    msgBody: InfoflowGroupMessageBodyItem[],
+    msgtype: string,
+  ): Promise<{ ok: boolean; error?: string; messageid?: string }> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const controller = new AbortController();
+      timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const payload = {
+        message: {
+          header: {
+            toid: groupId,
+            totype: "GROUP",
+            msgtype,
+            clientmsgid: Date.now() + msgIndex++,
+            role: "robot",
+          },
+          body: msgBody,
         },
-        body,
-      },
-    };
+      };
 
-    // NOTE: Infoflow API requires "Bearer-<token>" format (with hyphen, not space).
-    // This is a non-standard format specific to Infoflow service. Do not modify
-    // unless the Infoflow API specification changes.
-    const headers = {
-      Authorization: `Bearer-${tokenResult.token}`,
-      "Content-Type": "application/json",
-    };
+      const bodyStr = JSON.stringify(payload);
+      logVerbose(`[infoflow:sendGroup] POST body: ${bodyStr}`);
 
-    const bodyStr = JSON.stringify(payload);
+      const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_SEND_PATH}`, {
+        method: "POST",
+        headers,
+        body: bodyStr,
+        signal: controller.signal,
+      });
 
-    // Log request URL and body when verbose logging is enabled
-    logVerbose(`[infoflow:sendGroup] POST body: ${bodyStr}`);
+      const data = JSON.parse(await res.text()) as Record<string, unknown>;
+      logVerbose(
+        `[infoflow:sendGroup] response: status=${res.status}, data=${JSON.stringify(data)}`,
+      );
 
-    const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_SEND_PATH}`, {
-      method: "POST",
-      headers,
-      body: bodyStr,
-      signal: controller.signal,
-    });
+      const code = typeof data.code === "string" ? data.code : "";
+      if (code !== "ok") {
+        const errMsg = String(data.message ?? data.errmsg ?? `code=${code || "unknown"}`);
+        getInfoflowSendLog().error(`[infoflow:sendGroup] failed: ${errMsg}`);
+        return { ok: false, error: errMsg };
+      }
 
-    const data = JSON.parse(await res.text()) as Record<string, unknown>;
-    logVerbose(`[infoflow:sendGroup] response: status=${res.status}, data=${JSON.stringify(data)}`);
+      const innerData = data.data as Record<string, unknown> | undefined;
+      const errcode = innerData?.errcode;
+      if (errcode != null && errcode !== 0) {
+        const errMsg = String(innerData?.errmsg ?? `errcode ${errcode}`);
+        getInfoflowSendLog().error(`[infoflow:sendGroup] failed: ${errMsg}`);
+        return { ok: false, error: errMsg };
+      }
 
-    // Check outer code first
-    const code = typeof data.code === "string" ? data.code : "";
-    if (code !== "ok") {
-      const errMsg = String(data.message ?? data.errmsg ?? `code=${code || "unknown"}`);
-      getInfoflowSendLog().error(`[infoflow:sendGroup] failed: ${errMsg}`);
+      const nestedData = innerData?.data as Record<string, unknown> | undefined;
+      const messageid = extractMessageId(nestedData ?? innerData ?? {});
+      if (messageid) {
+        recordSentMessageId(messageid);
+      }
+
+      return { ok: true, messageid };
+    } catch (err) {
+      const errMsg = formatInfoflowError(err);
+      getInfoflowSendLog().error(`[infoflow:sendGroup] exception: ${errMsg}`);
       return { ok: false, error: errMsg };
+    } finally {
+      clearTimeout(timeout);
     }
+  };
 
-    // Check inner data.errcode
-    const innerData = data.data as Record<string, unknown> | undefined;
-    const errcode = innerData?.errcode;
-    if (errcode != null && errcode !== 0) {
-      const errMsg = String(innerData?.errmsg ?? `errcode ${errcode}`);
-      getInfoflowSendLog().error(`[infoflow:sendGroup] failed: ${errMsg}`);
-      return { ok: false, error: errMsg };
+  let lastMessageId: string | undefined;
+  let firstError: string | undefined;
+
+  // 1) Send text/AT/MD items together (if any)
+  if (textItems.length > 0) {
+    const msgtype = hasMarkdown ? "MD" : "TEXT";
+    const result = await postGroupMessage(textItems, msgtype);
+    if (result.ok) {
+      lastMessageId = result.messageid;
+    } else if (!firstError) {
+      firstError = result.error;
     }
-
-    // Extract message ID from nested data.data structure and record for dedup
-    const nestedData = innerData?.data as Record<string, unknown> | undefined;
-    const messageid = extractMessageId(nestedData ?? innerData ?? {});
-    if (messageid) {
-      recordSentMessageId(messageid);
-    }
-
-    return { ok: true, messageid };
-  } catch (err) {
-    const errMsg = formatInfoflowError(err);
-    getInfoflowSendLog().error(`[infoflow:sendGroup] exception: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  // 2) Send each LINK as a separate message
+  for (const linkItem of linkItems) {
+    const result = await postGroupMessage([linkItem], "TEXT");
+    if (result.ok) {
+      lastMessageId = result.messageid;
+    } else if (!firstError) {
+      firstError = result.error;
+    }
+  }
+
+  // 3) Send each IMAGE as a separate message
+  for (const imageItem of imageItems) {
+    const result = await postGroupMessage([imageItem], "IMAGE");
+    if (result.ok) {
+      lastMessageId = result.messageid;
+    } else if (!firstError) {
+      firstError = result.error;
+    }
+  }
+
+  if (firstError) {
+    return { ok: false, error: firstError, messageid: lastMessageId };
+  }
+  return { ok: true, messageid: lastMessageId };
 }
 
 // ---------------------------------------------------------------------------

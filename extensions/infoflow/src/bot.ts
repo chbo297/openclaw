@@ -1,3 +1,10 @@
+import {
+  buildPendingHistoryContextFromMap,
+  clearHistoryEntriesIfEnabled,
+  DEFAULT_GROUP_HISTORY_LIMIT,
+  type HistoryEntry,
+  recordPendingHistoryEntryIfEnabled,
+} from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
@@ -219,6 +226,9 @@ function buildProactivePrompt(): string {
 /** In-memory map tracking bot's last reply timestamp per group */
 const groupLastReplyMap = new Map<string, number>();
 
+/** In-memory map accumulating recent group messages for context injection when bot is @mentioned */
+const chatHistories = new Map<string, HistoryEntry[]>();
+
 /** Record that the bot replied to a group (called after successful send) */
 export function recordGroupReply(groupId: string): void {
   groupLastReplyMap.set(groupId, Date.now());
@@ -291,7 +301,7 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
   const timestamp = createTime != null ? Number(createTime) * 1000 : Date.now();
 
   logVerbose(
-    `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, raw msgData: ${JSON.stringify(msgData)}`,
+    `[infoflow] private chat: fromuser=${fromuser}, senderName=${senderName}, mes=${mes}, raw msgData: ${JSON.stringify(msgData)}`,
   );
 
   if (!fromuser || !mes.trim()) {
@@ -488,8 +498,36 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     body: mes,
   });
 
+  // Inject accumulated group chat history into the body for context
+  const historyKey = isGroup && groupId !== undefined ? String(groupId) : undefined;
+  let combinedBody = body;
+  if (isGroup && historyKey) {
+    combinedBody = buildPendingHistoryContextFromMap({
+      historyMap: chatHistories,
+      historyKey,
+      limit: DEFAULT_GROUP_HISTORY_LIMIT,
+      currentMessage: body,
+      formatEntry: (entry) =>
+        core.channel.reply.formatAgentEnvelope({
+          channel: "Infoflow",
+          from: entry.sender,
+          timestamp: entry.timestamp ?? Date.now(),
+          body: entry.body,
+        }),
+    });
+  }
+
+  const inboundHistory =
+    isGroup && historyKey
+      ? (chatHistories.get(historyKey) ?? []).map((e) => ({
+          sender: e.sender,
+          body: e.body,
+          timestamp: e.timestamp,
+        }))
+      : undefined;
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
-    Body: body,
+    Body: combinedBody,
     RawBody: event.rawMes ?? mes,
     CommandBody: mes,
     From: fromAddress,
@@ -509,6 +547,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     OriginatingTo: toAddress,
     WasMentioned: isGroup ? event.wasMentioned : undefined,
     ReplyToBody: event.replyContext ? event.replyContext.join("\n---\n") : undefined,
+    InboundHistory: inboundHistory,
     CommandAuthorized: true,
   });
 
@@ -532,6 +571,14 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
 
     // "record" mode: save to session only, no think, no reply
     if (replyMode === "record") {
+      if (groupIdStr) {
+        recordPendingHistoryEntryIfEnabled({
+          historyMap: chatHistories,
+          historyKey: groupIdStr,
+          entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+          limit: DEFAULT_GROUP_HISTORY_LIMIT,
+        });
+      }
       return;
     }
 
@@ -550,6 +597,14 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
         ) {
           ctxPayload.GroupSystemPrompt = buildFollowUpPrompt();
         } else {
+          if (groupIdStr) {
+            recordPendingHistoryEntryIfEnabled({
+              historyMap: chatHistories,
+              historyKey: groupIdStr,
+              entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+              limit: DEFAULT_GROUP_HISTORY_LIMIT,
+            });
+          }
           return;
         }
       }
@@ -575,6 +630,14 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           // Follow-up window: let LLM decide if this is a follow-up
           ctxPayload.GroupSystemPrompt = buildFollowUpPrompt();
         } else {
+          if (groupIdStr) {
+            recordPendingHistoryEntryIfEnabled({
+              historyMap: chatHistories,
+              historyKey: groupIdStr,
+              entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+              limit: DEFAULT_GROUP_HISTORY_LIMIT,
+            });
+          }
           return;
         }
       }
@@ -634,20 +697,31 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     mentionIds: isGroup ? event.mentionIds : undefined,
   });
 
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+  const dispatchResult = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
     dispatcherOptions,
     replyOptions,
   });
 
+  const didReply = dispatchResult?.queuedFinal ?? false;
+
+  // Clear accumulated history after dispatch (it's now in the session transcript)
+  if (isGroup && historyKey) {
+    clearHistoryEntriesIfEnabled({
+      historyMap: chatHistories,
+      historyKey,
+      limit: DEFAULT_GROUP_HISTORY_LIMIT,
+    });
+  }
+
   // Record bot reply timestamp for follow-up window tracking
-  if (isGroup && groupId !== undefined) {
+  if (didReply && isGroup && groupId !== undefined) {
     recordGroupReply(String(groupId));
   }
 
   logVerbose(
-    `[infoflow] dispatch complete: ${chatType} from ${fromuser}, hasGroupSystemPrompt=${Boolean(ctxPayload.GroupSystemPrompt)}`,
+    `[infoflow] dispatch complete: ${chatType} from ${fromuser}, replied=${didReply}, finalCount=${dispatchResult?.counts.final ?? 0}, hasGroupSystemPrompt=${Boolean(ctxPayload.GroupSystemPrompt)}`,
   );
 }
 

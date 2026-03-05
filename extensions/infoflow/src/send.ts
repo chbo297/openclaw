@@ -276,7 +276,7 @@ export async function sendInfoflowPrivateMessage(params: {
 
     const bodyStr = JSON.stringify(payload);
 
-    // Log request body when verbose logging is enabled
+    // Log request URL and body when verbose logging is enabled
     logVerbose(`[infoflow:sendPrivate] POST body: ${bodyStr}`);
 
     const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_PRIVATE_SEND_PATH}`, {
@@ -287,6 +287,9 @@ export async function sendInfoflowPrivateMessage(params: {
     });
 
     const data = JSON.parse(await res.text()) as Record<string, unknown>;
+    logVerbose(
+      `[infoflow:sendPrivate] response: status=${res.status}, data=${JSON.stringify(data)}`,
+    );
 
     // Check outer code first
     const code = typeof data.code === "string" ? data.code : "";
@@ -432,7 +435,7 @@ export async function sendInfoflowGroupMessage(params: {
 
     const bodyStr = JSON.stringify(payload);
 
-    // Log request body when verbose logging is enabled
+    // Log request URL and body when verbose logging is enabled
     logVerbose(`[infoflow:sendGroup] POST body: ${bodyStr}`);
 
     const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_SEND_PATH}`, {
@@ -443,6 +446,7 @@ export async function sendInfoflowGroupMessage(params: {
     });
 
     const data = JSON.parse(await res.text()) as Record<string, unknown>;
+    logVerbose(`[infoflow:sendGroup] response: status=${res.status}, data=${JSON.stringify(data)}`);
 
     // Check outer code first
     const code = typeof data.code === "string" ? data.code : "";

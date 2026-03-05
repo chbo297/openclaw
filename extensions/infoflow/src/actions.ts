@@ -50,7 +50,8 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
       }
 
       const messageId = readStringParam(params, "messageId");
-      const countStr = readStringParam(params, "count");
+      // Default to count=1 (recall latest message) when neither messageId nor count is provided
+      const countStr = readStringParam(params, "count") ?? (messageId ? undefined : "1");
 
       // Mode A: single message recall by messageId
       if (messageId) {
@@ -160,8 +161,6 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
           details,
         });
       }
-
-      throw new Error("delete requires either messageId or count.");
     }
 
     // -----------------------------------------------------------------------

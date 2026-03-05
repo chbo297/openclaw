@@ -627,7 +627,8 @@ export async function recallInfoflowGroupMessage(params: {
 
     const payload = { groupId, messageid, msgseqid };
     const bodyStr = JSON.stringify(payload);
-    logVerbose(`[infoflow:recallGroup] POST body: ${bodyStr}`);
+
+    logVerbose(`[infoflow:recallGroup] POST token: ${tokenResult.token} body: ${bodyStr}`);
 
     const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_RECALL_PATH}`, {
       method: "POST",

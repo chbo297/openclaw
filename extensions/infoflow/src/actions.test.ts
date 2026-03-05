@@ -642,15 +642,33 @@ describe("infoflowMessageActions", () => {
     expect(mockRemoveRecalledMessages).toHaveBeenCalledWith("default", ["msg-1"]);
   });
 
-  it("throws when neither messageId nor count is provided", async () => {
-    await expect(
-      infoflowMessageActions.handleAction!({
-        channel: "infoflow",
-        action: "delete" as never,
-        cfg: {} as never,
-        params: { to: "group:123" },
-      }),
-    ).rejects.toThrow("delete requires either messageId or count");
+  it("defaults to count=1 when neither messageId nor count is provided", async () => {
+    mockQuerySentMessages.mockReturnValue([
+      {
+        target: "group:123",
+        messageid: "msg-1",
+        msgseqid: "seq-1",
+        digest: "latest",
+        sentAt: Date.now(),
+      },
+    ]);
+    mockRecallInfoflowGroupMessage.mockResolvedValue({ ok: true });
+
+    const result = await infoflowMessageActions.handleAction!({
+      channel: "infoflow",
+      action: "delete" as never,
+      cfg: {} as never,
+      params: { to: "group:123" },
+    });
+
+    expect(mockQuerySentMessages).toHaveBeenCalledWith("default", {
+      target: "group:123",
+      count: 1,
+    });
+    expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      details: { ok: true, recalled: 1 },
+    });
   });
 
   it("passes accountId through to delete action", async () => {

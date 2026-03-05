@@ -517,7 +517,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   // Build conversation label and from address based on chat type
   const fromLabel = isGroup ? `group:${groupId}` : senderName || fromuser;
   const fromAddress = isGroup ? `infoflow:group:${groupId}` : `infoflow:${fromuser}`;
-  const toAddress = isGroup ? `infoflow:${groupId}` : `infoflow:${account.accountId}`;
+  const toAddress = isGroup ? `infoflow:${groupId}` : `infoflow:${fromuser}`;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "Infoflow",

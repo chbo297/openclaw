@@ -64,6 +64,37 @@ function parseLinkContent(content: string): { href: string; label: string } {
 }
 
 /**
+ * Checks if a string looks like a local file path rather than a URL.
+ * Mirrors the pattern from src/media/parse.ts; security validation is
+ * deferred to the load layer (loadWebMedia).
+ */
+function isLikelyLocalPath(content: string): boolean {
+  const trimmed = content.trim();
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith("~")
+  );
+}
+
+/**
+ * Extracts a numeric or string value for the given key from raw JSON text.
+ * This bypasses JSON.parse precision loss for large integers (>2^53).
+ * Matches both bare integers ("key": 123) and quoted strings ("key": "abc").
+ */
+export function extractIdFromRawJson(rawJson: string, key: string): string | undefined {
+  // Match bare integer: "key": 12345
+  const reNum = new RegExp(`"${key}"\\s*:\\s*(\\d+)`);
+  const mNum = rawJson.match(reNum);
+  if (mNum) return mNum[1];
+  // Match quoted string: "key": "value"
+  const reStr = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
+  const mStr = rawJson.match(reStr);
+  return mStr?.[1];
+}
+
+/**
  * Extracts message ID from Infoflow API response data.
  * Handles different response formats:
  * - Private: data.msgkey
@@ -307,10 +338,9 @@ export async function sendInfoflowPrivateMessage(params: {
       signal: controller.signal,
     });
 
-    const data = JSON.parse(await res.text()) as Record<string, unknown>;
-    logVerbose(
-      `[infoflow:sendPrivate] response: status=${res.status}, data=${JSON.stringify(data)}`,
-    );
+    const responseText = await res.text();
+    const data = JSON.parse(responseText) as Record<string, unknown>;
+    logVerbose(`[infoflow:sendPrivate] response: status=${res.status}, data=${responseText}`);
 
     // Check outer code first
     const code = typeof data.code === "string" ? data.code : "";
@@ -333,8 +363,11 @@ export async function sendInfoflowPrivateMessage(params: {
       };
     }
 
-    // Extract message ID and record for dedup
-    const msgkey = extractMessageId(innerData ?? {});
+    // Extract message ID from raw text to preserve large integer precision
+    const msgkey =
+      extractIdFromRawJson(responseText, "msgkey") ??
+      extractIdFromRawJson(responseText, "messageid") ??
+      extractMessageId(innerData ?? {});
     if (msgkey) {
       recordSentMessageId(msgkey);
       try {
@@ -487,10 +520,9 @@ export async function sendInfoflowGroupMessage(params: {
         signal: controller.signal,
       });
 
-      const data = JSON.parse(await res.text()) as Record<string, unknown>;
-      logVerbose(
-        `[infoflow:sendGroup] response: status=${res.status}, data=${JSON.stringify(data)}`,
-      );
+      const responseText = await res.text();
+      const data = JSON.parse(responseText) as Record<string, unknown>;
+      logVerbose(`[infoflow:sendGroup] response: status=${res.status}, data=${responseText}`);
 
       const code = typeof data.code === "string" ? data.code : "";
       if (code !== "ok") {
@@ -507,9 +539,11 @@ export async function sendInfoflowGroupMessage(params: {
         return { ok: false, error: errMsg };
       }
 
-      const nestedData = innerData?.data as Record<string, unknown> | undefined;
-      const messageid = extractMessageId(nestedData ?? innerData ?? {});
-      const msgseqid = extractMsgSeqId(nestedData ?? innerData ?? {});
+      // Extract IDs from raw text to preserve large integer precision
+      const messageid =
+        extractIdFromRawJson(responseText, "messageid") ??
+        extractIdFromRawJson(responseText, "msgid");
+      const msgseqid = extractIdFromRawJson(responseText, "msgseqid");
       if (messageid) {
         recordSentMessageId(messageid);
       }
@@ -603,8 +637,8 @@ export async function sendInfoflowGroupMessage(params: {
 export async function recallInfoflowGroupMessage(params: {
   account: ResolvedInfoflowAccount;
   groupId: number;
-  messageid: number;
-  msgseqid: number;
+  messageid: string;
+  msgseqid: string;
   timeoutMs?: number;
 }): Promise<{ ok: boolean; error?: string }> {
   const { account, groupId, messageid, msgseqid, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
@@ -625,8 +659,8 @@ export async function recallInfoflowGroupMessage(params: {
     const controller = new AbortController();
     timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const payload = { groupId, messageid, msgseqid };
-    const bodyStr = JSON.stringify(payload);
+    // Build JSON manually to embed messageid/msgseqid as raw integers without Number precision loss
+    const bodyStr = `{"groupId":${groupId},"messageid":${messageid},"msgseqid":${msgseqid}}`;
 
     logVerbose(`[infoflow:recallGroup] POST token: ${tokenResult.token} body: ${bodyStr}`);
 
@@ -672,12 +706,64 @@ export async function recallInfoflowGroupMessage(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Local Image Link Resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-processes content items: for "link" items pointing to local file paths,
+ * checks if the file is an image and converts to "image" type with base64 content.
+ * Falls back to original "link" type if not an image or on error.
+ */
+async function resolveLocalImageLinks(
+  contents: InfoflowMessageContentItem[],
+): Promise<InfoflowMessageContentItem[]> {
+  const hasLocalLinks = contents.some(
+    (item) => item.type === "link" && isLikelyLocalPath(parseLinkContent(item.content).href),
+  );
+  if (!hasLocalLinks) {
+    return contents;
+  }
+
+  // Dynamic import to avoid circular dependency (media.ts imports from send.ts)
+  const { prepareInfoflowImageBase64 } = await import("./media.js");
+
+  const resolved: InfoflowMessageContentItem[] = [];
+  for (const item of contents) {
+    if (item.type !== "link") {
+      resolved.push(item);
+      continue;
+    }
+
+    const { href } = parseLinkContent(item.content);
+    if (!isLikelyLocalPath(href)) {
+      resolved.push(item);
+      continue;
+    }
+
+    // Attempt image detection for local path
+    try {
+      const prepared = await prepareInfoflowImageBase64({ mediaUrl: href });
+      if (prepared.isImage) {
+        resolved.push({ type: "image", content: prepared.base64 });
+        continue;
+      }
+    } catch {
+      logVerbose(`[infoflow:send] local image detection failed for ${href}, sending as link`);
+    }
+    resolved.push(item);
+  }
+
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
 // Unified Message Sending
 // ---------------------------------------------------------------------------
 
 /**
  * Unified message sending entry point.
  * Parses the `to` target and dispatches to group or private message sending.
+ * Local file path links that are images are automatically sent as native images.
  * @param cfg - OpenClaw config
  * @param to - Target: "username" for private, "group:123" for group
  * @param contents - Array of content items (text/markdown/at)
@@ -704,14 +790,18 @@ export async function sendInfoflowMessage(params: {
     return { ok: false, error: "contents array is empty" };
   }
 
+  // Pre-process: convert local-path link items to native image items if they're images
+  const resolvedContents = await resolveLocalImageLinks(contents);
+
   // Parse target: remove "infoflow:" prefix if present
   const target = to.replace(/^infoflow:/i, "");
 
   // Check if target is a group (format: group:123)
   const groupMatch = target.match(/^group:(\d+)/i);
   if (groupMatch) {
+    // Group path: sendInfoflowGroupMessage already handles IMAGE items
     const groupId = Number(groupMatch[1]);
-    const result = await sendInfoflowGroupMessage({ account, groupId, contents });
+    const result = await sendInfoflowGroupMessage({ account, groupId, contents: resolvedContents });
     return {
       ok: result.ok,
       error: result.error,
@@ -720,13 +810,48 @@ export async function sendInfoflowMessage(params: {
     };
   }
 
-  // Private message (DM)
-  const result = await sendInfoflowPrivateMessage({ account, toUser: target, contents });
-  return {
-    ok: result.ok,
-    error: result.error,
-    messageId: result.msgkey,
-  };
+  // Private path: split image items (sendInfoflowPrivateMessage doesn't handle image type)
+  const imageItems = resolvedContents.filter((c) => c.type === "image");
+  const nonImageContents = resolvedContents.filter((c) => c.type !== "image");
+
+  let lastMessageId: string | undefined;
+  let firstError: string | undefined;
+
+  // Send non-image contents via private message API
+  if (nonImageContents.length > 0) {
+    const result = await sendInfoflowPrivateMessage({
+      account,
+      toUser: target,
+      contents: nonImageContents,
+    });
+    if (result.ok) {
+      lastMessageId = result.msgkey;
+    } else {
+      firstError = result.error;
+    }
+  }
+
+  // Send image items as native private images
+  if (imageItems.length > 0) {
+    const { sendInfoflowPrivateImage } = await import("./media.js");
+    for (const imgItem of imageItems) {
+      const result = await sendInfoflowPrivateImage({
+        account,
+        toUser: target,
+        base64Image: imgItem.content,
+      });
+      if (result.ok) {
+        lastMessageId = result.msgkey;
+      } else if (!firstError) {
+        firstError = result.error;
+      }
+    }
+  }
+
+  if (firstError && !lastMessageId) {
+    return { ok: false, error: firstError };
+  }
+  return { ok: true, messageId: lastMessageId };
 }
 
 // ---------------------------------------------------------------------------

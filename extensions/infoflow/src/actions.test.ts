@@ -468,8 +468,8 @@ describe("infoflowMessageActions", () => {
     expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith({
       account: expect.objectContaining({ accountId: "default" }),
       groupId: 123,
-      messageid: 456,
-      msgseqid: 789,
+      messageid: "456",
+      msgseqid: "789",
     });
     expect(result).toMatchObject({
       details: { ok: true, channel: "infoflow", to: "group:123" },
@@ -495,7 +495,7 @@ describe("infoflowMessageActions", () => {
 
     expect(mockFindSentMessage).toHaveBeenCalledWith("default", "456");
     expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ messageid: 456, msgseqid: 789 }),
+      expect.objectContaining({ messageid: "456", msgseqid: "789" }),
     );
   });
 
@@ -683,8 +683,8 @@ describe("infoflowMessageActions", () => {
     expect(mockRecallInfoflowGroupMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         groupId: 123,
-        messageid: 456,
-        msgseqid: 789,
+        messageid: "456",
+        msgseqid: "789",
       }),
     );
   });

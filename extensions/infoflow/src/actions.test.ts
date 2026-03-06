@@ -512,15 +512,15 @@ describe("infoflowMessageActions", () => {
     ).rejects.toThrow("delete requires msgseqid");
   });
 
-  it("throws when delete target is not a group", async () => {
+  it("throws when delete target is private and appAgentId is not configured", async () => {
     await expect(
       infoflowMessageActions.handleAction!({
         channel: "infoflow",
         action: "delete" as never,
         cfg: {} as never,
-        params: { to: "user1", messageId: "456", msgseqid: "789" },
+        params: { to: "user1", messageId: "456" },
       }),
-    ).rejects.toThrow("Infoflow recall is only supported for group messages");
+    ).rejects.toThrow("Infoflow private message recall requires appAgentId configuration");
   });
 
   it("returns error from recallInfoflowGroupMessage", async () => {

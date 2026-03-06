@@ -7,7 +7,20 @@ import { getInfoflowSendLog, formatInfoflowError, logVerbose } from "./logging.j
 import { prepareInfoflowImageBase64, sendInfoflowImageMessage } from "./media.js";
 import { getInfoflowRuntime } from "./runtime.js";
 import { sendInfoflowMessage } from "./send.js";
-import type { InfoflowAtOptions, InfoflowMentionIds, InfoflowMessageContentItem } from "./types.js";
+import type {
+  InfoflowAtOptions,
+  InfoflowMentionIds,
+  InfoflowMessageContentItem,
+  InfoflowOutboundReply,
+} from "./types.js";
+
+const PREVIEW_MAX_LENGTH = 100;
+
+function truncatePreview(text?: string): string {
+  if (!text) return "";
+  if (text.length <= PREVIEW_MAX_LENGTH) return text;
+  return text.slice(0, PREVIEW_MAX_LENGTH) + "...";
+}
 
 export type CreateInfoflowReplyDispatcherParams = {
   cfg: OpenClawConfig;
@@ -20,6 +33,10 @@ export type CreateInfoflowReplyDispatcherParams = {
   atOptions?: InfoflowAtOptions;
   /** Mention IDs from inbound message for resolving @id in LLM output */
   mentionIds?: InfoflowMentionIds;
+  /** Inbound message ID for outbound reply-to (group only) */
+  replyToMessageId?: string;
+  /** Preview text of the inbound message for reply context */
+  replyToPreview?: string;
 };
 
 /**
@@ -27,7 +44,17 @@ export type CreateInfoflowReplyDispatcherParams = {
  * Encapsulates prefix options, chunked deliver (send via Infoflow API + statusSink), and onError.
  */
 export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatcherParams) {
-  const { cfg, agentId, accountId, to, statusSink, atOptions, mentionIds } = params;
+  const {
+    cfg,
+    agentId,
+    accountId,
+    to,
+    statusSink,
+    atOptions,
+    mentionIds,
+    replyToMessageId,
+    replyToPreview,
+  } = params;
   const core = getInfoflowRuntime();
 
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
@@ -50,6 +77,13 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
       mentionIdMap.set(String(id).toLowerCase(), "agent");
     }
   }
+
+  // Build replyTo context (only used for the first outbound message)
+  const replyTo: InfoflowOutboundReply | undefined =
+    isGroup && replyToMessageId
+      ? { messageid: replyToMessageId, preview: truncatePreview(replyToPreview) }
+      : undefined;
+  let replyApplied = false;
 
   const deliver = async (payload: ReplyPayload) => {
     const text = payload.text ?? "";
@@ -138,7 +172,16 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
         // Add markdown content
         contents.push({ type: "markdown", content: chunk });
 
-        const result = await sendInfoflowMessage({ cfg, to, contents, accountId });
+        // Only include replyTo on the first outbound message
+        const chunkReplyTo = !replyApplied ? replyTo : undefined;
+        const result = await sendInfoflowMessage({
+          cfg,
+          to,
+          contents,
+          accountId,
+          replyTo: chunkReplyTo,
+        });
+        if (chunkReplyTo) replyApplied = true;
 
         if (result.ok) {
           statusSink?.({ lastOutboundAt: Date.now() });
@@ -152,6 +195,7 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
 
     // --- Media handling: send each media item as native image or fallback link ---
     for (const mediaUrl of mediaList) {
+      const mediaReplyTo = !replyApplied ? replyTo : undefined;
       try {
         const prepared = await prepareInfoflowImageBase64({ mediaUrl });
         if (prepared.isImage) {
@@ -160,8 +204,10 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
             to,
             base64Image: prepared.base64,
             accountId,
+            replyTo: mediaReplyTo,
           });
           if (result.ok) {
+            if (mediaReplyTo) replyApplied = true;
             statusSink?.({ lastOutboundAt: Date.now() });
             continue;
           }
@@ -176,7 +222,9 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
         to,
         contents: [{ type: "link", content: mediaUrl }],
         accountId,
+        replyTo: mediaReplyTo,
       });
+      if (mediaReplyTo) replyApplied = true;
     }
   };
 

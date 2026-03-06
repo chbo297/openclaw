@@ -16,7 +16,7 @@ import {
   INFOFLOW_GROUP_SEND_PATH,
 } from "./send.js";
 import { recordSentMessage } from "./sent-message-store.js";
-import type { ResolvedInfoflowAccount } from "./types.js";
+import type { ResolvedInfoflowAccount, InfoflowOutboundReply } from "./types.js";
 
 /** Infoflow API image size limit: 1MB raw bytes */
 const INFOFLOW_IMAGE_MAX_BYTES = 1 * 1024 * 1024;
@@ -137,6 +137,7 @@ export async function sendInfoflowGroupImage(params: {
   account: ResolvedInfoflowAccount;
   groupId: number;
   base64Image: string;
+  replyTo?: InfoflowOutboundReply;
   timeoutMs?: number;
 }): Promise<{ ok: boolean; error?: string; messageid?: string }> {
   const { account, groupId, base64Image, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
@@ -167,6 +168,15 @@ export async function sendInfoflowGroupImage(params: {
           role: "robot",
         },
         body: [{ type: "IMAGE", content: base64Image }],
+        ...(params.replyTo
+          ? {
+              reply: {
+                messageid: params.replyTo.messageid,
+                preview: params.replyTo.preview ?? "",
+                replytype: params.replyTo.replytype ?? "1",
+              },
+            }
+          : {}),
       },
     };
 
@@ -331,6 +341,7 @@ export async function sendInfoflowImageMessage(params: {
   to: string;
   base64Image: string;
   accountId?: string;
+  replyTo?: InfoflowOutboundReply;
 }): Promise<{ ok: boolean; error?: string; messageId?: string }> {
   const { cfg, to, base64Image, accountId } = params;
   const account = resolveInfoflowAccount({ cfg, accountId });
@@ -341,11 +352,16 @@ export async function sendInfoflowImageMessage(params: {
   const groupMatch = target.match(/^group:(\d+)/i);
   if (groupMatch) {
     const groupId = Number(groupMatch[1]);
-    const result = await sendInfoflowGroupImage({ account, groupId, base64Image });
+    const result = await sendInfoflowGroupImage({
+      account,
+      groupId,
+      base64Image,
+      replyTo: params.replyTo,
+    });
     return { ok: result.ok, error: result.error, messageId: result.messageid };
   }
 
-  // Private message
+  // Private message (replyTo not supported)
   const result = await sendInfoflowPrivateImage({ account, toUser: target, base64Image });
   return { ok: result.ok, error: result.error, messageId: result.msgkey };
 }

@@ -25,6 +25,8 @@ export type InfoflowGroupConfig = {
   followUp?: boolean;
   followUpWindow?: number;
   systemPrompt?: string;
+  /** Enable thinking indicator ("收到🤔...") before processing (default: true) */
+  thinkingIndicator?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +82,16 @@ export type InfoflowMessageContentItem = {
   content: string;
 };
 
+/** Outbound reply/quote context for group messages */
+export type InfoflowOutboundReply = {
+  /** Message ID of the message being replied to (string to preserve large integer precision) */
+  messageid: string;
+  /** Preview text of the quoted message */
+  preview?: string;
+  /** "1" = reply (default), "2" = quote */
+  replytype?: "1" | "2";
+};
+
 // ---------------------------------------------------------------------------
 // Account configuration
 // ---------------------------------------------------------------------------
@@ -108,6 +120,10 @@ export type InfoflowAccountConfig = {
   followUp?: boolean;
   /** Follow-up window in seconds after last bot reply (default: 300) */
   followUpWindow?: number;
+  /** Enable thinking indicator ("收到🤔...") before processing (default: true) */
+  thinkingIndicator?: boolean;
+  /** 如流企业后台的应用ID（私聊消息撤回依赖此字段） */
+  appAgentId?: number;
   /** Per-group configuration overrides, keyed by group ID */
   groups?: Record<string, InfoflowGroupConfig>;
   accounts?: Record<string, InfoflowAccountConfig>;
@@ -143,6 +159,10 @@ export type ResolvedInfoflowAccount = {
     followUp?: boolean;
     /** Follow-up window in seconds after last bot reply (default: 300) */
     followUpWindow?: number;
+    /** Enable thinking indicator ("收到🤔...") before processing (default: true) */
+    thinkingIndicator?: boolean;
+    /** 如流企业后台的应用ID（私聊消息撤回依赖此字段） */
+    appAgentId?: number;
     /** Per-group configuration overrides, keyed by group ID */
     groups?: Record<string, InfoflowGroupConfig>;
   };

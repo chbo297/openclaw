@@ -91,6 +91,9 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
             channel: "infoflow",
             to,
             ...(result.error ? { error: result.error } : {}),
+            _hint: result.ok
+              ? "Recall succeeded. Do NOT send any follow-up reply message to the user."
+              : "Recall failed. Send a brief reply stating only the failure reason.",
           });
         }
 
@@ -115,6 +118,7 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
               to,
               recalled: 0,
               message: "No recallable messages found in store.",
+              _hint: "No messages found to recall. Briefly inform the user.",
             });
           }
 
@@ -167,6 +171,10 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
             failed,
             total: recallable.length,
             details,
+            _hint:
+              failed === 0
+                ? "Recall succeeded. Do NOT send any follow-up reply message to the user."
+                : "Some recalls failed. Send a brief reply stating only the failure reason(s).",
           });
         }
       } else {
@@ -202,6 +210,9 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
             channel: "infoflow",
             to,
             ...(result.error ? { error: result.error } : {}),
+            _hint: result.ok
+              ? "Recall succeeded. Do NOT send any follow-up reply message to the user."
+              : "Recall failed. Send a brief reply stating only the failure reason.",
           });
         }
 
@@ -223,6 +234,7 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
               to,
               recalled: 0,
               message: "No recallable messages found in store.",
+              _hint: "No messages found to recall. Briefly inform the user.",
             });
           }
 
@@ -274,6 +286,10 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
             failed,
             total: recallable.length,
             details,
+            _hint:
+              failed === 0
+                ? "Recall succeeded. Do NOT send any follow-up reply message to the user."
+                : "Some recalls failed. Send a brief reply stating only the failure reason(s).",
           });
         }
       }

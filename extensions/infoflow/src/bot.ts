@@ -21,6 +21,7 @@ import type {
   InfoflowChatType,
   InfoflowMessageEvent,
   InfoflowMentionIds,
+  InfoflowOutboundReply,
   InfoflowReplyMode,
   InfoflowGroupConfig,
   HandleInfoflowMessageParams,
@@ -307,20 +308,22 @@ async function sendThinkingIndicator(params: {
   cfg: OpenClawConfig;
   to: string;
   accountId: string;
+  replyTo?: InfoflowOutboundReply;
 }): Promise<ThinkingIndicatorHandle | undefined> {
-  const { cfg, to, accountId } = params;
+  const { cfg, to, accountId, replyTo } = params;
   try {
     const result = await sendInfoflowMessage({
       cfg,
       to,
       contents: [{ type: "text", content: "收到🤔..." }],
       accountId,
+      replyTo,
     });
-    if (result.ok && result.messageId && result.msgseqid) {
+    if (result.ok && result.messageId) {
       logVerbose(
-        `[infoflow] thinking indicator sent: to=${to}, messageId=${result.messageId}, msgseqid=${result.msgseqid}`,
+        `[infoflow] thinking indicator sent: to=${to}, messageId=${result.messageId}, msgseqid=${result.msgseqid ?? "n/a"}`,
       );
-      return { messageid: result.messageId, msgseqid: result.msgseqid };
+      return { messageid: result.messageId, msgseqid: result.msgseqid ?? "" };
     }
     if (!result.ok) {
       logVerbose(`[infoflow] thinking indicator send failed: ${result.error}`);
@@ -887,7 +890,15 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   const thinkingEnabled = groupCfg?.thinkingIndicator ?? account.config.thinkingIndicator ?? true;
   let thinkingHandle: ThinkingIndicatorHandle | undefined;
   if (thinkingEnabled) {
-    thinkingHandle = await sendThinkingIndicator({ cfg, to, accountId: account.accountId });
+    thinkingHandle = await sendThinkingIndicator({
+      cfg,
+      to,
+      accountId: account.accountId,
+      replyTo:
+        isGroup && event.messageId
+          ? { messageid: event.messageId, preview: mes.slice(0, 100) }
+          : undefined,
+    });
   }
 
   // Provide mention context to the LLM so it can decide who to @mention

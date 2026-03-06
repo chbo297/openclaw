@@ -5,11 +5,14 @@ import {
   type HistoryEntry,
   recordPendingHistoryEntryIfEnabled,
   buildAgentMediaPayload,
+  type OpenClawConfig,
+  type ReplyPayload,
 } from "openclaw/plugin-sdk";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
 import { getInfoflowRuntime } from "./runtime.js";
+import { sendInfoflowMessage, recallInfoflowGroupMessage } from "./send.js";
 import type {
   InfoflowChatType,
   InfoflowMessageEvent,
@@ -254,6 +257,7 @@ type ResolvedGroupConfig = {
   followUpWindow: number;
   watchMentions: string[];
   systemPrompt?: string;
+  thinkingIndicator: boolean;
 };
 
 /** Infer replyMode from legacy requireMention + watchMentions fields */
@@ -278,7 +282,79 @@ function resolveGroupConfig(
     followUpWindow: groupCfg?.followUpWindow ?? account.config.followUpWindow ?? 300,
     watchMentions: groupCfg?.watchMentions ?? account.config.watchMentions ?? [],
     systemPrompt: groupCfg?.systemPrompt,
+    thinkingIndicator: groupCfg?.thinkingIndicator ?? account.config.thinkingIndicator ?? true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Thinking indicator (收到🤔...)
+// ---------------------------------------------------------------------------
+
+type ThinkingIndicatorHandle = {
+  messageid: string;
+  msgseqid: string;
+};
+
+/**
+ * Sends a "收到🤔..." thinking indicator message.
+ * Returns message IDs needed for recall, or undefined on failure.
+ */
+async function sendThinkingIndicator(params: {
+  cfg: OpenClawConfig;
+  to: string;
+  accountId: string;
+}): Promise<ThinkingIndicatorHandle | undefined> {
+  const { cfg, to, accountId } = params;
+  try {
+    const result = await sendInfoflowMessage({
+      cfg,
+      to,
+      contents: [{ type: "text", content: "收到🤔..." }],
+      accountId,
+    });
+    if (result.ok && result.messageId && result.msgseqid) {
+      logVerbose(
+        `[infoflow] thinking indicator sent: to=${to}, messageId=${result.messageId}, msgseqid=${result.msgseqid}`,
+      );
+      return { messageid: result.messageId, msgseqid: result.msgseqid };
+    }
+    if (!result.ok) {
+      logVerbose(`[infoflow] thinking indicator send failed: ${result.error}`);
+    }
+    return undefined;
+  } catch (err) {
+    logVerbose(`[infoflow] thinking indicator exception: ${formatInfoflowError(err)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Recalls a previously sent thinking indicator (group only).
+ * Silently swallows errors to avoid disrupting the reply flow.
+ */
+async function recallThinkingIndicator(params: {
+  cfg: OpenClawConfig;
+  groupId: number;
+  accountId: string;
+  handle: ThinkingIndicatorHandle;
+}): Promise<void> {
+  const { cfg, groupId, accountId, handle } = params;
+  try {
+    const account = resolveInfoflowAccount({ cfg, accountId });
+    const result = await recallInfoflowGroupMessage({
+      account,
+      groupId,
+      messageid: handle.messageid,
+      msgseqid: handle.msgseqid,
+    });
+    if (result.ok) {
+      logVerbose(`[infoflow] thinking indicator recalled: groupId=${groupId}`);
+    } else {
+      logVerbose(`[infoflow] thinking indicator recall failed: ${result.error}`);
+    }
+  } catch (err) {
+    logVerbose(`[infoflow] thinking indicator recall exception: ${formatInfoflowError(err)}`);
+  }
 }
 
 /**
@@ -782,6 +858,13 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   // Build unified target: "group:<id>" for group chat, username for private chat
   const to = isGroup && groupId !== undefined ? `group:${groupId}` : fromuser;
 
+  // --- Thinking indicator ("收到🤔...") ---
+  const thinkingEnabled = groupCfg?.thinkingIndicator ?? account.config.thinkingIndicator ?? true;
+  let thinkingHandle: ThinkingIndicatorHandle | undefined;
+  if (thinkingEnabled) {
+    thinkingHandle = await sendThinkingIndicator({ cfg, to, accountId: account.accountId });
+  }
+
   // Provide mention context to the LLM so it can decide who to @mention
   if (isGroup && event.mentionIds) {
     const parts: string[] = [];
@@ -806,12 +889,41 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     atOptions: isGroup && event.wasMentioned ? { atUserIds: [fromuser] } : undefined,
     // Pass mention IDs for LLM-driven @mention resolution in outbound text
     mentionIds: isGroup ? event.mentionIds : undefined,
+    // Pass inbound messageId for outbound reply-to (group only)
+    replyToMessageId: isGroup ? event.messageId : undefined,
+    replyToPreview: isGroup ? mes : undefined,
   });
+
+  // Wrap dispatcher to recall thinking indicator before first delivery (group only)
+  const canRecallThinking = isGroup && thinkingHandle && groupId !== undefined;
+  let thinkingRecalled = false;
+  const doRecallThinking = async () => {
+    if (thinkingRecalled || !canRecallThinking) return;
+    thinkingRecalled = true;
+    await recallThinkingIndicator({
+      cfg,
+      groupId: groupId!,
+      accountId: account.accountId,
+      handle: thinkingHandle!,
+    });
+  };
+
+  const originalDeliver = dispatcherOptions.deliver;
+  const wrappedDispatcherOptions = {
+    ...dispatcherOptions,
+    deliver: async (payload: ReplyPayload) => {
+      await doRecallThinking();
+      return originalDeliver(payload);
+    },
+    onCleanup: () => {
+      void doRecallThinking();
+    },
+  };
 
   const dispatchResult = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
-    dispatcherOptions,
+    dispatcherOptions: wrappedDispatcherOptions,
     replyOptions,
   });
 

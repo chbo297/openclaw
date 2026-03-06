@@ -9,14 +9,18 @@ import { extractToolSend, jsonResult, readStringParam } from "openclaw/plugin-sd
 import { resolveInfoflowAccount } from "./accounts.js";
 import { logVerbose } from "./logging.js";
 import { prepareInfoflowImageBase64, sendInfoflowImageMessage } from "./media.js";
-import { sendInfoflowMessage, recallInfoflowGroupMessage } from "./send.js";
+import {
+  sendInfoflowMessage,
+  recallInfoflowGroupMessage,
+  recallInfoflowPrivateMessage,
+} from "./send.js";
 import {
   findSentMessage,
   querySentMessages,
   removeRecalledMessages,
 } from "./sent-message-store.js";
 import { normalizeInfoflowTarget } from "./targets.js";
-import type { InfoflowMessageContentItem } from "./types.js";
+import type { InfoflowMessageContentItem, InfoflowOutboundReply } from "./types.js";
 
 export const infoflowMessageActions: ChannelMessageActionAdapter = {
   listActions: (): ChannelMessageActionName[] => ["send", "delete"],
@@ -35,15 +39,6 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
       const to = normalizeInfoflowTarget(rawTo) ?? rawTo;
       const target = to.replace(/^infoflow:/i, "");
 
-      // Only group messages can be recalled
-      const groupMatch = target.match(/^group:(\d+)/i);
-      if (!groupMatch) {
-        throw new Error(
-          "Infoflow recall is only supported for group messages (target must be group:<id>).",
-        );
-      }
-      const groupId = Number(groupMatch[1]);
-
       const account = resolveInfoflowAccount({ cfg, accountId: accountId ?? undefined });
       if (!account.config.appKey || !account.config.appSecret) {
         throw new Error("Infoflow appKey/appSecret not configured.");
@@ -53,113 +48,234 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
       // Default to count=1 (recall latest message) when neither messageId nor count is provided
       const countStr = readStringParam(params, "count") ?? (messageId ? undefined : "1");
 
-      // Mode A: single message recall by messageId
-      if (messageId) {
-        // Try to find msgseqid from store; fall back to params
-        let msgseqid = readStringParam(params, "msgseqid") ?? "";
-        if (!msgseqid) {
-          const stored = findSentMessage(account.accountId, messageId);
-          if (stored?.msgseqid) {
-            msgseqid = stored.msgseqid;
+      const groupMatch = target.match(/^group:(\d+)/i);
+
+      if (groupMatch) {
+        // -----------------------------------------------------------------
+        // 群消息撤回
+        // -----------------------------------------------------------------
+        const groupId = Number(groupMatch[1]);
+
+        // Mode A: single message recall by messageId
+        if (messageId) {
+          let msgseqid = readStringParam(params, "msgseqid") ?? "";
+          if (!msgseqid) {
+            const stored = findSentMessage(account.accountId, messageId);
+            if (stored?.msgseqid) {
+              msgseqid = stored.msgseqid;
+            }
           }
-        }
-        if (!msgseqid) {
-          throw new Error(
-            "delete requires msgseqid (not found in store; provide it explicitly or send messages first).",
-          );
-        }
-
-        const result = await recallInfoflowGroupMessage({
-          account,
-          groupId,
-          messageid: messageId,
-          msgseqid,
-        });
-
-        if (result.ok) {
-          try {
-            removeRecalledMessages(account.accountId, [messageId]);
-          } catch {
-            // ignore cleanup errors
+          if (!msgseqid) {
+            throw new Error(
+              "delete requires msgseqid (not found in store; provide it explicitly or send messages first).",
+            );
           }
-        }
 
-        return jsonResult({
-          ok: result.ok,
-          channel: "infoflow",
-          to,
-          ...(result.error ? { error: result.error } : {}),
-        });
-      }
-
-      // Mode B: batch recall by count
-      if (countStr) {
-        const count = Number(countStr);
-        if (!Number.isFinite(count) || count < 1) {
-          throw new Error("count must be a positive integer.");
-        }
-
-        const records = querySentMessages(account.accountId, { target: `group:${groupId}`, count });
-        // Filter to records that have msgseqid (required for recall)
-        const recallable = records.filter((r) => r.msgseqid);
-
-        if (recallable.length === 0) {
-          return jsonResult({
-            ok: true,
-            channel: "infoflow",
-            to,
-            recalled: 0,
-            message: "No recallable messages found in store.",
-          });
-        }
-
-        let succeeded = 0;
-        let failed = 0;
-        const recalledIds: string[] = [];
-        const details: Array<{ messageid: string; digest: string; ok: boolean; error?: string }> =
-          [];
-
-        for (const record of recallable) {
           const result = await recallInfoflowGroupMessage({
             account,
             groupId,
-            messageid: record.messageid,
-            msgseqid: record.msgseqid,
+            messageid: messageId,
+            msgseqid,
           });
 
           if (result.ok) {
-            succeeded++;
-            recalledIds.push(record.messageid);
-            details.push({ messageid: record.messageid, digest: record.digest, ok: true });
-          } else {
-            failed++;
-            details.push({
-              messageid: record.messageid,
-              digest: record.digest,
-              ok: false,
-              error: result.error,
+            try {
+              removeRecalledMessages(account.accountId, [messageId]);
+            } catch {
+              // ignore cleanup errors
+            }
+          }
+
+          return jsonResult({
+            ok: result.ok,
+            channel: "infoflow",
+            to,
+            ...(result.error ? { error: result.error } : {}),
+          });
+        }
+
+        // Mode B: batch recall by count
+        if (countStr) {
+          const count = Number(countStr);
+          if (!Number.isFinite(count) || count < 1) {
+            throw new Error("count must be a positive integer.");
+          }
+
+          const records = querySentMessages(account.accountId, {
+            target: `group:${groupId}`,
+            count,
+          });
+          // Filter to records that have msgseqid (required for group recall)
+          const recallable = records.filter((r) => r.msgseqid);
+
+          if (recallable.length === 0) {
+            return jsonResult({
+              ok: true,
+              channel: "infoflow",
+              to,
+              recalled: 0,
+              message: "No recallable messages found in store.",
             });
           }
-        }
 
-        // Remove successfully recalled messages from store
-        if (recalledIds.length > 0) {
-          try {
-            removeRecalledMessages(account.accountId, recalledIds);
-          } catch {
-            // ignore cleanup errors
+          let succeeded = 0;
+          let failed = 0;
+          const recalledIds: string[] = [];
+          const details: Array<{
+            messageid: string;
+            digest: string;
+            ok: boolean;
+            error?: string;
+          }> = [];
+
+          for (const record of recallable) {
+            const result = await recallInfoflowGroupMessage({
+              account,
+              groupId,
+              messageid: record.messageid,
+              msgseqid: record.msgseqid,
+            });
+
+            if (result.ok) {
+              succeeded++;
+              recalledIds.push(record.messageid);
+              details.push({ messageid: record.messageid, digest: record.digest, ok: true });
+            } else {
+              failed++;
+              details.push({
+                messageid: record.messageid,
+                digest: record.digest,
+                ok: false,
+                error: result.error,
+              });
+            }
           }
+
+          if (recalledIds.length > 0) {
+            try {
+              removeRecalledMessages(account.accountId, recalledIds);
+            } catch {
+              // ignore cleanup errors
+            }
+          }
+
+          return jsonResult({
+            ok: failed === 0,
+            channel: "infoflow",
+            to,
+            recalled: succeeded,
+            failed,
+            total: recallable.length,
+            details,
+          });
+        }
+      } else {
+        // -----------------------------------------------------------------
+        // 私聊消息撤回
+        // -----------------------------------------------------------------
+        const appAgentId = account.config.appAgentId;
+        if (!appAgentId) {
+          throw new Error(
+            "Infoflow private message recall requires appAgentId configuration. " +
+              "Set channels.infoflow.appAgentId to your application ID (如流企业后台的应用ID).",
+          );
         }
 
-        return jsonResult({
-          ok: failed === 0,
-          channel: "infoflow",
-          to,
-          recalled: succeeded,
-          failed,
-          total: recallable.length,
-          details,
-        });
+        // Mode A: single message recall by messageId (msgkey)
+        if (messageId) {
+          const result = await recallInfoflowPrivateMessage({
+            account,
+            msgkey: messageId,
+            appAgentId,
+          });
+
+          if (result.ok) {
+            try {
+              removeRecalledMessages(account.accountId, [messageId]);
+            } catch {
+              // ignore cleanup errors
+            }
+          }
+
+          return jsonResult({
+            ok: result.ok,
+            channel: "infoflow",
+            to,
+            ...(result.error ? { error: result.error } : {}),
+          });
+        }
+
+        // Mode B: batch recall by count
+        if (countStr) {
+          const count = Number(countStr);
+          if (!Number.isFinite(count) || count < 1) {
+            throw new Error("count must be a positive integer.");
+          }
+
+          const records = querySentMessages(account.accountId, { target, count });
+          // 私聊消息的 msgseqid 为空，只需要有 messageid (即 msgkey) 即可撤回
+          const recallable = records.filter((r) => r.messageid);
+
+          if (recallable.length === 0) {
+            return jsonResult({
+              ok: true,
+              channel: "infoflow",
+              to,
+              recalled: 0,
+              message: "No recallable messages found in store.",
+            });
+          }
+
+          let succeeded = 0;
+          let failed = 0;
+          const recalledIds: string[] = [];
+          const details: Array<{
+            messageid: string;
+            digest: string;
+            ok: boolean;
+            error?: string;
+          }> = [];
+
+          for (const record of recallable) {
+            const result = await recallInfoflowPrivateMessage({
+              account,
+              msgkey: record.messageid,
+              appAgentId,
+            });
+
+            if (result.ok) {
+              succeeded++;
+              recalledIds.push(record.messageid);
+              details.push({ messageid: record.messageid, digest: record.digest, ok: true });
+            } else {
+              failed++;
+              details.push({
+                messageid: record.messageid,
+                digest: record.digest,
+                ok: false,
+                error: result.error,
+              });
+            }
+          }
+
+          if (recalledIds.length > 0) {
+            try {
+              removeRecalledMessages(account.accountId, recalledIds);
+            } catch {
+              // ignore cleanup errors
+            }
+          }
+
+          return jsonResult({
+            ok: failed === 0,
+            channel: "infoflow",
+            to,
+            recalled: succeeded,
+            failed,
+            total: recallable.length,
+            details,
+          });
+        }
       }
     }
 
@@ -189,6 +305,19 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
 
     const isGroup = /^group:\d+$/i.test(to);
     const contents: InfoflowMessageContentItem[] = [];
+
+    // Infoflow reply-to params (group only)
+    const replyToMessageId = readStringParam(params, "replyToMessageId");
+    const replyToPreview = readStringParam(params, "replyToPreview");
+    const replyTypeRaw = readStringParam(params, "replyType");
+    const replyTo: InfoflowOutboundReply | undefined =
+      replyToMessageId && isGroup
+        ? {
+            messageid: replyToMessageId,
+            preview: replyToPreview ?? undefined,
+            replytype: replyTypeRaw === "2" ? "2" : "1",
+          }
+        : undefined;
 
     // Build AT content nodes (group messages only)
     if (isGroup) {
@@ -233,7 +362,13 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
 
       // Send text+mentions first (if any)
       if (contents.length > 0) {
-        await sendInfoflowMessage({ cfg, to, contents, accountId: accountId ?? undefined });
+        await sendInfoflowMessage({
+          cfg,
+          to,
+          contents,
+          accountId: accountId ?? undefined,
+          replyTo,
+        });
       }
 
       // Try native image send, fallback to link
@@ -245,6 +380,7 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
             to,
             base64Image: prepared.base64,
             accountId: accountId ?? undefined,
+            replyTo: contents.length > 0 ? undefined : replyTo,
           });
           return jsonResult({
             ok: imgResult.ok,
@@ -264,6 +400,7 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
         to,
         contents: [{ type: "link", content: mediaUrl }],
         accountId: accountId ?? undefined,
+        replyTo: contents.length > 0 ? undefined : replyTo,
       });
       return jsonResult({
         ok: linkResult.ok,
@@ -287,6 +424,7 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
       to,
       contents,
       accountId: accountId ?? undefined,
+      replyTo,
     });
 
     return jsonResult({

@@ -12,6 +12,7 @@ import { recordSentMessage, buildMessageDigest } from "./sent-message-store.js";
 import type {
   InfoflowGroupMessageBodyItem,
   InfoflowMessageContentItem,
+  InfoflowOutboundReply,
   ResolvedInfoflowAccount,
 } from "./types.js";
 
@@ -37,6 +38,7 @@ const INFOFLOW_AUTH_PATH = "/api/v1/auth/app_access_token";
 export const INFOFLOW_PRIVATE_SEND_PATH = "/api/v1/app/message/send";
 export const INFOFLOW_GROUP_SEND_PATH = "/api/v1/robot/msg/groupmsgsend";
 export const INFOFLOW_GROUP_RECALL_PATH = "/api/v1/robot/group/msgRecall";
+export const INFOFLOW_PRIVATE_RECALL_PATH = "/api/v1/app/message/revoke";
 
 // Token cache to avoid fetching token for every message
 // Use Map keyed by appKey to support multi-account isolation
@@ -407,6 +409,7 @@ export async function sendInfoflowGroupMessage(params: {
   account: ResolvedInfoflowAccount;
   groupId: number;
   contents: InfoflowMessageContentItem[];
+  replyTo?: InfoflowOutboundReply;
   timeoutMs?: number;
 }): Promise<{ ok: boolean; error?: string; messageid?: string; msgseqid?: string }> {
   const { account, groupId, contents, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
@@ -491,6 +494,7 @@ export async function sendInfoflowGroupMessage(params: {
   const postGroupMessage = async (
     msgBody: InfoflowGroupMessageBodyItem[],
     msgtype: string,
+    replyTo?: InfoflowOutboundReply,
   ): Promise<{ ok: boolean; error?: string; messageid?: string; msgseqid?: string }> => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -507,6 +511,15 @@ export async function sendInfoflowGroupMessage(params: {
             role: "robot",
           },
           body: msgBody,
+          ...(replyTo
+            ? {
+                reply: {
+                  messageid: replyTo.messageid,
+                  preview: replyTo.preview ?? "",
+                  replytype: replyTo.replytype ?? "1",
+                },
+              }
+            : {}),
         },
       };
 
@@ -581,11 +594,17 @@ export async function sendInfoflowGroupMessage(params: {
   let lastMessageId: string | undefined;
   let lastMsgSeqId: string | undefined;
   let firstError: string | undefined;
+  let replyApplied = false;
 
   // 1) Send text/AT/MD items together (if any)
   if (textItems.length > 0) {
     const msgtype = hasMarkdown ? "MD" : "TEXT";
-    const result = await postGroupMessage(textItems, msgtype);
+    const result = await postGroupMessage(
+      textItems,
+      msgtype,
+      !replyApplied ? params.replyTo : undefined,
+    );
+    replyApplied = true;
     if (result.ok) {
       lastMessageId = result.messageid;
       lastMsgSeqId = result.msgseqid;
@@ -598,7 +617,12 @@ export async function sendInfoflowGroupMessage(params: {
 
   // 2) Send each LINK as a separate message
   for (const linkItem of linkItems) {
-    const result = await postGroupMessage([linkItem], "TEXT");
+    const result = await postGroupMessage(
+      [linkItem],
+      "TEXT",
+      !replyApplied ? params.replyTo : undefined,
+    );
+    replyApplied = true;
     if (result.ok) {
       lastMessageId = result.messageid;
       lastMsgSeqId = result.msgseqid;
@@ -610,7 +634,12 @@ export async function sendInfoflowGroupMessage(params: {
 
   // 3) Send each IMAGE as a separate message
   for (const imageItem of imageItems) {
-    const result = await postGroupMessage([imageItem], "IMAGE");
+    const result = await postGroupMessage(
+      [imageItem],
+      "IMAGE",
+      !replyApplied ? params.replyTo : undefined,
+    );
+    replyApplied = true;
     if (result.ok) {
       lastMessageId = result.messageid;
       lastMsgSeqId = result.msgseqid;
@@ -644,10 +673,12 @@ export async function recallInfoflowGroupMessage(params: {
   const { account, groupId, messageid, msgseqid, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
   const { apiHost, appKey, appSecret } = account.config;
 
+  // 验证必要的认证配置
   if (!appKey || !appSecret) {
     return { ok: false, error: "Infoflow appKey/appSecret not configured." };
   }
 
+  // 获取应用访问令牌
   const tokenResult = await getAppAccessToken({ apiHost, appKey, appSecret, timeoutMs });
   if (!tokenResult.ok || !tokenResult.token) {
     getInfoflowSendLog().error(`[infoflow:recallGroup] token error: ${tokenResult.error}`);
@@ -659,11 +690,12 @@ export async function recallInfoflowGroupMessage(params: {
     const controller = new AbortController();
     timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    // Build JSON manually to embed messageid/msgseqid as raw integers without Number precision loss
+    // 手动构建 JSON 以保持 messageid/msgseqid 为原始整数，避免 JavaScript Number 精度丢失
     const bodyStr = `{"groupId":${groupId},"messageid":${messageid},"msgseqid":${msgseqid}}`;
 
     logVerbose(`[infoflow:recallGroup] POST token: ${tokenResult.token} body: ${bodyStr}`);
 
+    // 发送撤回请求
     const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_GROUP_RECALL_PATH}`, {
       method: "POST",
       headers: {
@@ -679,6 +711,7 @@ export async function recallInfoflowGroupMessage(params: {
       `[infoflow:recallGroup] response: status=${res.status}, data=${JSON.stringify(data)}`,
     );
 
+    // 检查外层响应码
     const code = typeof data.code === "string" ? data.code : "";
     if (code !== "ok") {
       const errMsg = String(data.message ?? data.errmsg ?? `code=${code || "unknown"}`);
@@ -686,7 +719,7 @@ export async function recallInfoflowGroupMessage(params: {
       return { ok: false, error: errMsg };
     }
 
-    // Check inner errcode
+    // 检查内层错误码
     const innerData = data.data as Record<string, unknown> | undefined;
     const errcode = innerData?.errcode;
     if (errcode != null && errcode !== 0) {
@@ -699,6 +732,87 @@ export async function recallInfoflowGroupMessage(params: {
   } catch (err) {
     const errMsg = formatInfoflowError(err);
     getInfoflowSendLog().error(`[infoflow:recallGroup] exception: ${errMsg}`);
+    return { ok: false, error: errMsg };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private Message Recall (撤回)
+// ---------------------------------------------------------------------------
+
+/**
+ * Recalls (撤回) a private message previously sent by the app.
+ * Uses the /api/v1/app/message/revoke endpoint.
+ */
+export async function recallInfoflowPrivateMessage(params: {
+  account: ResolvedInfoflowAccount;
+  /** 发送消息时返回的 msgkey（存储于 sent-message-store 的 messageid 字段） */
+  msgkey: string;
+  /** 如流企业后台"应用ID" */
+  appAgentId: number;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { account, msgkey, appAgentId, timeoutMs = DEFAULT_TIMEOUT_MS } = params;
+  const { apiHost, appKey, appSecret } = account.config;
+
+  if (!appKey || !appSecret) {
+    return { ok: false, error: "Infoflow appKey/appSecret not configured." };
+  }
+
+  const tokenResult = await getAppAccessToken({ apiHost, appKey, appSecret, timeoutMs });
+  if (!tokenResult.ok || !tokenResult.token) {
+    getInfoflowSendLog().error(`[infoflow:recallPrivate] token error: ${tokenResult.error}`);
+    return { ok: false, error: tokenResult.error ?? "failed to get token" };
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    const bodyStr = JSON.stringify({ msgkey, agentid: appAgentId });
+
+    logVerbose(`[infoflow:recallPrivate] POST body: ${bodyStr}`);
+
+    const res = await fetch(`${ensureHttps(apiHost)}${INFOFLOW_PRIVATE_RECALL_PATH}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer-${tokenResult.token}`,
+        "Content-Type": "application/json; charset=utf-8",
+        LOGID: String(Date.now()),
+      },
+      body: bodyStr,
+      signal: controller.signal,
+    });
+
+    const data = JSON.parse(await res.text()) as Record<string, unknown>;
+    logVerbose(
+      `[infoflow:recallPrivate] response: status=${res.status}, data=${JSON.stringify(data)}`,
+    );
+
+    // 检查外层响应码
+    const code = typeof data.code === "string" ? data.code : "";
+    if (code !== "ok") {
+      const errMsg = String(data.message ?? data.errmsg ?? `code=${code || "unknown"}`);
+      getInfoflowSendLog().error(`[infoflow:recallPrivate] failed: ${errMsg}`);
+      return { ok: false, error: errMsg };
+    }
+
+    // 检查内层错误码
+    const innerData = data.data as Record<string, unknown> | undefined;
+    const errcode = innerData?.errcode;
+    if (errcode != null && errcode !== 0) {
+      const errMsg = String(innerData?.errmsg ?? `errcode ${errcode}`);
+      getInfoflowSendLog().error(`[infoflow:recallPrivate] failed: ${errMsg}`);
+      return { ok: false, error: errMsg };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    const errMsg = formatInfoflowError(err);
+    getInfoflowSendLog().error(`[infoflow:recallPrivate] exception: ${errMsg}`);
     return { ok: false, error: errMsg };
   } finally {
     clearTimeout(timeout);
@@ -768,12 +882,14 @@ async function resolveLocalImageLinks(
  * @param to - Target: "username" for private, "group:123" for group
  * @param contents - Array of content items (text/markdown/at)
  * @param accountId - Optional account ID for multi-account support
+ * @param replyTo - Optional reply context for group messages (ignored for private)
  */
 export async function sendInfoflowMessage(params: {
   cfg: OpenClawConfig;
   to: string;
   contents: InfoflowMessageContentItem[];
   accountId?: string;
+  replyTo?: InfoflowOutboundReply;
 }): Promise<{ ok: boolean; error?: string; messageId?: string; msgseqid?: string }> {
   const { cfg, to, contents, accountId } = params;
 
@@ -801,7 +917,12 @@ export async function sendInfoflowMessage(params: {
   if (groupMatch) {
     // Group path: sendInfoflowGroupMessage already handles IMAGE items
     const groupId = Number(groupMatch[1]);
-    const result = await sendInfoflowGroupMessage({ account, groupId, contents: resolvedContents });
+    const result = await sendInfoflowGroupMessage({
+      account,
+      groupId,
+      contents: resolvedContents,
+      replyTo: params.replyTo,
+    });
     return {
       ok: result.ok,
       error: result.error,

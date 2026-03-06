@@ -72,8 +72,8 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
         const result = await recallInfoflowGroupMessage({
           account,
           groupId,
-          messageid: Number(messageId),
-          msgseqid: Number(msgseqid),
+          messageid: messageId,
+          msgseqid,
         });
 
         if (result.ok) {
@@ -123,8 +123,8 @@ export const infoflowMessageActions: ChannelMessageActionAdapter = {
           const result = await recallInfoflowGroupMessage({
             account,
             groupId,
-            messageid: Number(record.messageid),
-            msgseqid: Number(record.msgseqid),
+            messageid: record.messageid,
+            msgseqid: record.msgseqid,
           });
 
           if (result.ok) {

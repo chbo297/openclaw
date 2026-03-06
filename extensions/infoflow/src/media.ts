@@ -10,8 +10,7 @@ import { getInfoflowRuntime } from "./runtime.js";
 import {
   getAppAccessToken,
   ensureHttps,
-  extractMessageId,
-  extractMsgSeqId,
+  extractIdFromRawJson,
   DEFAULT_TIMEOUT_MS,
   INFOFLOW_PRIVATE_SEND_PATH,
   INFOFLOW_GROUP_SEND_PATH,
@@ -187,10 +186,9 @@ export async function sendInfoflowGroupImage(params: {
       signal: controller.signal,
     });
 
-    const data = JSON.parse(await res.text()) as Record<string, unknown>;
-    logVerbose(
-      `[infoflow:sendGroupImage] response: status=${res.status}, data=${JSON.stringify(data)}`,
-    );
+    const responseText = await res.text();
+    const data = JSON.parse(responseText) as Record<string, unknown>;
+    logVerbose(`[infoflow:sendGroupImage] response: status=${res.status}, data=${responseText}`);
 
     const code = typeof data.code === "string" ? data.code : "";
     if (code !== "ok") {
@@ -207,9 +205,11 @@ export async function sendInfoflowGroupImage(params: {
       return { ok: false, error: errMsg };
     }
 
-    const nestedData = innerData?.data as Record<string, unknown> | undefined;
-    const messageid = extractMessageId(nestedData ?? innerData ?? {});
-    const msgseqid = extractMsgSeqId(nestedData ?? innerData ?? {});
+    // Extract IDs from raw text to preserve large integer precision
+    const messageid =
+      extractIdFromRawJson(responseText, "messageid") ??
+      extractIdFromRawJson(responseText, "msgid");
+    const msgseqid = extractIdFromRawJson(responseText, "msgseqid");
     if (messageid) {
       recordSentMessageId(messageid);
       try {
@@ -284,10 +284,9 @@ export async function sendInfoflowPrivateImage(params: {
       signal: controller.signal,
     });
 
-    const data = JSON.parse(await res.text()) as Record<string, unknown>;
-    logVerbose(
-      `[infoflow:sendPrivateImage] response: status=${res.status}, data=${JSON.stringify(data)}`,
-    );
+    const responseText = await res.text();
+    const data = JSON.parse(responseText) as Record<string, unknown>;
+    logVerbose(`[infoflow:sendPrivateImage] response: status=${res.status}, data=${responseText}`);
 
     if (data.errcode && data.errcode !== 0) {
       const errMsg = String(data.errmsg ?? `errcode ${data.errcode}`);
@@ -295,7 +294,10 @@ export async function sendInfoflowPrivateImage(params: {
       return { ok: false, error: errMsg };
     }
 
-    const msgkey = data.msgkey != null ? String(data.msgkey) : undefined;
+    // Extract msgkey from raw text to preserve large integer precision
+    const msgkey =
+      extractIdFromRawJson(responseText, "msgkey") ??
+      (data.msgkey != null ? String(data.msgkey) : undefined);
     if (msgkey) {
       recordSentMessageId(msgkey);
       try {

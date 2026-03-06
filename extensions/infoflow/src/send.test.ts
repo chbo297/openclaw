@@ -15,10 +15,22 @@ vi.mock("./infoflow-req-parse.js", () => ({
   recordSentMessageId: vi.fn(),
 }));
 
+vi.mock("./sent-message-store.js", () => ({
+  recordSentMessage: vi.fn(),
+  buildMessageDigest: vi.fn(() => "digest"),
+}));
+
+vi.mock("./media.js", () => ({
+  prepareInfoflowImageBase64: vi.fn(),
+  sendInfoflowPrivateImage: vi.fn(),
+}));
+
+import { prepareInfoflowImageBase64, sendInfoflowPrivateImage } from "./media.js";
 import {
   getAppAccessToken,
   _resetTokenCache,
   extractMsgSeqId,
+  extractIdFromRawJson,
   recallInfoflowGroupMessage,
 } from "./send.js";
 
@@ -77,6 +89,8 @@ import { sendInfoflowMessage } from "./send.js";
 describe("sendInfoflowMessage", () => {
   beforeEach(() => {
     mockFetch.mockReset();
+    vi.mocked(prepareInfoflowImageBase64).mockReset();
+    vi.mocked(sendInfoflowPrivateImage).mockReset();
   });
 
   it("returns error when contents array is empty", async () => {
@@ -275,6 +289,161 @@ describe("sendInfoflowMessage", () => {
       { type: "MD", content: "Hello team" },
     ]);
   });
+
+  // ---------------------------------------------------------------------------
+  // Local image link resolution
+  // ---------------------------------------------------------------------------
+
+  it("converts local image link to native image for group messages", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    mockPrepare.mockResolvedValueOnce({ isImage: true, base64: "base64img" });
+
+    // Token + group send (IMAGE item)
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ code: "ok", data: { errcode: 0, data: { messageid: "grp-img" } } }),
+        ),
+    });
+
+    const result = await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "group:12345",
+      contents: [{ type: "link", content: "/tmp/screenshot.png" }],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(mockPrepare).toHaveBeenCalledWith({ mediaUrl: "/tmp/screenshot.png" });
+
+    // Verify IMAGE body was sent
+    const [, opts] = mockFetch.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as {
+      message: { header: { msgtype: string }; body: Array<{ type: string; content?: string }> };
+    };
+    expect(body.message.header.msgtype).toBe("IMAGE");
+    expect(body.message.body).toEqual([{ type: "IMAGE", content: "base64img" }]);
+  });
+
+  it("converts local image link to native private image", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    const mockPrivateImage = vi.mocked(sendInfoflowPrivateImage);
+    mockPrepare.mockResolvedValueOnce({ isImage: true, base64: "base64abc" });
+    mockPrivateImage.mockResolvedValueOnce({ ok: true, msgkey: "img-prv-1" });
+
+    const result = await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "user1",
+      contents: [{ type: "link", content: "/tmp/photo.jpg" }],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.messageId).toBe("img-prv-1");
+    expect(mockPrepare).toHaveBeenCalledWith({ mediaUrl: "/tmp/photo.jpg" });
+    expect(mockPrivateImage).toHaveBeenCalledWith(
+      expect.objectContaining({ toUser: "user1", base64Image: "base64abc" }),
+    );
+    // No fetch calls for private message text (only image was sent via native API)
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps local non-image link as link content", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    mockPrepare.mockResolvedValueOnce({ isImage: false });
+
+    // Token + private send (richtext with link)
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0, msgkey: "msg-lnk" } })),
+    });
+
+    const result = await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "user1",
+      contents: [{ type: "link", content: "/tmp/document.pdf" }],
+    });
+
+    expect(result.ok).toBe(true);
+    // Should be sent as richtext link, not as image
+    const [, opts] = mockFetch.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body.msgtype).toBe("richtext");
+  });
+
+  it("does not intercept HTTP URL links", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    mockPrepare.mockClear();
+
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0, msgkey: "msg-url" } })),
+    });
+
+    await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "user1",
+      contents: [{ type: "link", content: "https://example.com/image.png" }],
+    });
+
+    // prepareInfoflowImageBase64 should NOT be called for HTTP URLs
+    expect(mockPrepare).not.toHaveBeenCalled();
+  });
+
+  it("falls back to link when image detection throws", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    mockPrepare.mockRejectedValueOnce(new Error("file not found"));
+
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0, msgkey: "msg-fb" } })),
+    });
+
+    const result = await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "user1",
+      contents: [{ type: "link", content: "/tmp/missing.png" }],
+    });
+
+    expect(result.ok).toBe(true);
+    // Should fall back to richtext link
+    const [, opts] = mockFetch.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body.msgtype).toBe("richtext");
+  });
+
+  it("sends text + local image link as separate messages for private chat", async () => {
+    const mockPrepare = vi.mocked(prepareInfoflowImageBase64);
+    const mockPrivateImage = vi.mocked(sendInfoflowPrivateImage);
+    mockPrepare.mockResolvedValueOnce({ isImage: true, base64: "imgdata" });
+    mockPrivateImage.mockResolvedValueOnce({ ok: true, msgkey: "img-2" });
+
+    // Token + text send
+    mockFetch.mockResolvedValueOnce(mockTokenResponse("tok-1")).mockResolvedValueOnce({
+      ok: true,
+      text: () =>
+        Promise.resolve(JSON.stringify({ code: "ok", data: { errcode: 0, msgkey: "txt-1" } })),
+    });
+
+    const result = await sendInfoflowMessage({
+      cfg: {} as never,
+      to: "user1",
+      contents: [
+        { type: "markdown", content: "Here is the chart:" },
+        { type: "link", content: "/tmp/chart.png" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    // Text was sent via private message API
+    expect(mockFetch).toHaveBeenCalledTimes(2); // token + text
+    // Image was sent via native private image API
+    expect(mockPrivateImage).toHaveBeenCalledWith(
+      expect.objectContaining({ toUser: "user1", base64Image: "imgdata" }),
+    );
+  });
 });
 
 // ============================================================================
@@ -361,6 +530,38 @@ describe("getAppAccessToken", () => {
 });
 
 // ============================================================================
+// extractIdFromRawJson — large integer precision
+// ============================================================================
+
+describe("extractIdFromRawJson", () => {
+  it("extracts bare integer preserving full precision", () => {
+    const raw = '{"data":{"messageid":1858880144601632519,"msgseqid":300010777}}';
+    expect(extractIdFromRawJson(raw, "messageid")).toBe("1858880144601632519");
+    expect(extractIdFromRawJson(raw, "msgseqid")).toBe("300010777");
+  });
+
+  it("extracts quoted string value", () => {
+    const raw = '{"msgkey":"msg-abc-123"}';
+    expect(extractIdFromRawJson(raw, "msgkey")).toBe("msg-abc-123");
+  });
+
+  it("returns undefined for missing key", () => {
+    expect(extractIdFromRawJson('{"other":123}', "messageid")).toBeUndefined();
+  });
+
+  it("prefers bare integer over quoted string when key appears twice", () => {
+    // bare integer comes first in regex match
+    const raw = '{"messageid":1858880144601632519}';
+    expect(extractIdFromRawJson(raw, "messageid")).toBe("1858880144601632519");
+  });
+
+  it("handles whitespace around colon", () => {
+    const raw = '{"messageid" : 12345}';
+    expect(extractIdFromRawJson(raw, "messageid")).toBe("12345");
+  });
+});
+
+// ============================================================================
 // extractMsgSeqId
 // ============================================================================
 
@@ -417,8 +618,8 @@ describe("recallInfoflowGroupMessage", () => {
     const result = await recallInfoflowGroupMessage({
       account: ACCOUNT,
       groupId: 1671623,
-      messageid: 182891542208,
-      msgseqid: 300010777,
+      messageid: "182891542208",
+      msgseqid: "300010777",
     });
 
     expect(result).toEqual({ ok: true });
@@ -448,8 +649,8 @@ describe("recallInfoflowGroupMessage", () => {
     const result = await recallInfoflowGroupMessage({
       account: ACCOUNT,
       groupId: 123,
-      messageid: 456,
-      msgseqid: 789,
+      messageid: "456",
+      msgseqid: "789",
     });
 
     expect(result).toEqual({ ok: false, error: "message expired" });
@@ -467,8 +668,8 @@ describe("recallInfoflowGroupMessage", () => {
     const result = await recallInfoflowGroupMessage({
       account: ACCOUNT,
       groupId: 123,
-      messageid: 456,
-      msgseqid: 789,
+      messageid: "456",
+      msgseqid: "789",
     });
 
     expect(result).toEqual({ ok: false, error: "invalid msg" });
@@ -482,8 +683,8 @@ describe("recallInfoflowGroupMessage", () => {
     const result = await recallInfoflowGroupMessage({
       account: ACCOUNT,
       groupId: 123,
-      messageid: 456,
-      msgseqid: 789,
+      messageid: "456",
+      msgseqid: "789",
     });
 
     expect(result).toEqual({ ok: false, error: "ECONNREFUSED" });
@@ -498,8 +699,8 @@ describe("recallInfoflowGroupMessage", () => {
     const result = await recallInfoflowGroupMessage({
       account: noCredsAccount,
       groupId: 123,
-      messageid: 456,
-      msgseqid: 789,
+      messageid: "456",
+      msgseqid: "789",
     });
 
     expect(result).toEqual({ ok: false, error: "Infoflow appKey/appSecret not configured." });

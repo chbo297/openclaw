@@ -12,7 +12,11 @@ import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
 import { getInfoflowRuntime } from "./runtime.js";
-import { sendInfoflowMessage, recallInfoflowGroupMessage } from "./send.js";
+import {
+  sendInfoflowMessage,
+  recallInfoflowGroupMessage,
+  recallInfoflowPrivateMessage,
+} from "./send.js";
 import type {
   InfoflowChatType,
   InfoflowMessageEvent,
@@ -329,28 +333,49 @@ async function sendThinkingIndicator(params: {
 }
 
 /**
- * Recalls a previously sent thinking indicator (group only).
+ * Recalls a previously sent thinking indicator (group or private).
  * Silently swallows errors to avoid disrupting the reply flow.
  */
 async function recallThinkingIndicator(params: {
   cfg: OpenClawConfig;
-  groupId: number;
   accountId: string;
   handle: ThinkingIndicatorHandle;
+  groupId?: number;
+  isPrivate?: boolean;
 }): Promise<void> {
-  const { cfg, groupId, accountId, handle } = params;
+  const { cfg, accountId, handle, groupId, isPrivate } = params;
   try {
     const account = resolveInfoflowAccount({ cfg, accountId });
-    const result = await recallInfoflowGroupMessage({
-      account,
-      groupId,
-      messageid: handle.messageid,
-      msgseqid: handle.msgseqid,
-    });
-    if (result.ok) {
-      logVerbose(`[infoflow] thinking indicator recalled: groupId=${groupId}`);
-    } else {
-      logVerbose(`[infoflow] thinking indicator recall failed: ${result.error}`);
+    if (isPrivate) {
+      const appAgentId = account.config.appAgentId;
+      if (!appAgentId) {
+        logVerbose(
+          `[infoflow] thinking indicator private recall skipped: appAgentId not configured`,
+        );
+        return;
+      }
+      const result = await recallInfoflowPrivateMessage({
+        account,
+        msgkey: handle.messageid,
+        appAgentId,
+      });
+      if (result.ok) {
+        logVerbose(`[infoflow] thinking indicator recalled (private)`);
+      } else {
+        logVerbose(`[infoflow] thinking indicator private recall failed: ${result.error}`);
+      }
+    } else if (groupId !== undefined) {
+      const result = await recallInfoflowGroupMessage({
+        account,
+        groupId,
+        messageid: handle.messageid,
+        msgseqid: handle.msgseqid,
+      });
+      if (result.ok) {
+        logVerbose(`[infoflow] thinking indicator recalled: groupId=${groupId}`);
+      } else {
+        logVerbose(`[infoflow] thinking indicator recall failed: ${result.error}`);
+      }
     }
   } catch (err) {
     logVerbose(`[infoflow] thinking indicator recall exception: ${formatInfoflowError(err)}`);
@@ -894,17 +919,18 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     replyToPreview: isGroup ? mes : undefined,
   });
 
-  // Wrap dispatcher to recall thinking indicator before first delivery (group only)
-  const canRecallThinking = isGroup && thinkingHandle && groupId !== undefined;
+  // Wrap dispatcher to recall thinking indicator before first delivery
+  const canRecallThinking = Boolean(thinkingHandle);
   let thinkingRecalled = false;
   const doRecallThinking = async () => {
     if (thinkingRecalled || !canRecallThinking) return;
     thinkingRecalled = true;
     await recallThinkingIndicator({
       cfg,
-      groupId: groupId!,
       accountId: account.accountId,
       handle: thinkingHandle!,
+      groupId: isGroup ? groupId : undefined,
+      isPrivate: !isGroup,
     });
   };
 

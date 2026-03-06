@@ -30,7 +30,6 @@
       "followUp": { "type": "boolean", "default": true },
       "followUpWindow": { "type": "number", "default": 300 },
       "watchMentions": { "type": "array", "items": { "type": "string" } },
-      "thinkingIndicator": { "type": "boolean", "default": true },
       "groups": {
         "type": "object",
         "additionalProperties": {
@@ -43,8 +42,7 @@
             "watchMentions": { "type": "array", "items": { "type": "string" } },
             "followUp": { "type": "boolean" },
             "followUpWindow": { "type": "number" },
-            "systemPrompt": { "type": "string" },
-            "thinkingIndicator": { "type": "boolean" }
+            "systemPrompt": { "type": "string" }
           },
           "additionalProperties": false
         }
@@ -77,7 +75,6 @@
             "followUp": { "type": "boolean" },
             "followUpWindow": { "type": "number" },
             "watchMentions": { "type": "array", "items": { "type": "string" } },
-            "thinkingIndicator": { "type": "boolean" },
             "groups": {
               "type": "object",
               "additionalProperties": {
@@ -90,8 +87,7 @@
                   "watchMentions": { "type": "array", "items": { "type": "string" } },
                   "followUp": { "type": "boolean" },
                   "followUpWindow": { "type": "number" },
-                  "systemPrompt": { "type": "string" },
-                  "thinkingIndicator": { "type": "boolean" }
+                  "systemPrompt": { "type": "string" }
                 },
                 "additionalProperties": false
               }

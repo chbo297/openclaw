@@ -52,6 +52,7 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
   agentPrompt: {
     messageToolHints: () => [
       'Infoflow group @mentions: set atAll=true to @all members, or mentionUserIds="user1,user2" (comma-separated uuapName) to @mention specific users. Only effective for group targets (group:<id>).',
+      'Infoflow supports message recall (撤回): use action="delete" to recall the most recent message, or specify messageId to recall a specific message. Works for both private and group messages.',
     ],
   },
   config: {

@@ -71,6 +71,7 @@ function mergeInfoflowAccountConfig(
   robotName?: string;
   requireMention?: boolean;
   watchMentions?: string[];
+  watchRegex?: string;
   appAgentId?: number;
 } {
   const raw = getChannelSection(cfg) ?? {};
@@ -87,6 +88,7 @@ function mergeInfoflowAccountConfig(
     robotName?: string;
     requireMention?: boolean;
     watchMentions?: string[];
+    watchRegex?: string;
     appAgentId?: number;
   };
 }

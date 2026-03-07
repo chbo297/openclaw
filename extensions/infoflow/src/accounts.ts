@@ -133,6 +133,7 @@ export function resolveInfoflowAccount(params: {
       robotName: merged.robotName?.trim() || undefined,
       requireMention: merged.requireMention,
       watchMentions: merged.watchMentions,
+      watchRegex: merged.watchRegex,
       appAgentId: merged.appAgentId,
     },
   };

@@ -105,9 +105,6 @@ function checkWatchMentioned(
 
 /** Check if message content matches the configured watchRegex regex pattern */
 function checkWatchRegex(mes: string, pattern: string): boolean {
-  // 打印 mes 和 pattern
-  console.log("checkWatchRegex: mes =", mes);
-  console.log("checkWatchRegex: pattern =", pattern);
   try {
     return new RegExp(pattern, "i").test(mes);
   } catch {

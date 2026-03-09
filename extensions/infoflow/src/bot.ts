@@ -430,7 +430,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
         if (replyBody) {
           replyContextItems.push(replyBody);
         }
-      } else if (item.type === "TEXT") {
+      } else if (item.type === "TEXT" || item.type === "MD") {
         textContent += item.content ?? "";
         rawTextContent += item.content ?? "";
       } else if (item.type === "LINK") {
@@ -451,6 +451,10 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
         if (typeof url === "string" && url.trim()) {
           imageUrls.push(url.trim());
         }
+      } else if (typeof item.content === "string" && item.content.trim()) {
+        // Fallback: for any other item types with string content, treat content as text.
+        textContent += item.content;
+        rawTextContent += item.content;
       }
     }
   }
@@ -908,3 +912,6 @@ export const _checkWatchMentioned = checkWatchMentioned;
 
 /** @internal — Extract non-bot mention IDs. Only exported for tests. */
 export const _extractMentionIds = extractMentionIds;
+
+/** @internal — Check watchRegex against message content (dotAll). Only exported for tests. */
+export const _checkWatchRegex = checkWatchRegex;

@@ -373,11 +373,15 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
 export async function handleGroupChatMessage(params: HandleGroupChatParams): Promise<void> {
   const { cfg, msgData, accountId, statusSink } = params;
 
-  // Extract sender from nested structure or flat fields
+  // Extract sender from nested structure or flat fields.
+  // Some Infoflow events (including bot-authored forwards) only populate `fromid` on the root,
+  // so include msgData.fromid as a final fallback.
   const header = (msgData.message as Record<string, unknown>)?.header as
     | Record<string, unknown>
     | undefined;
-  const fromuser = String(header?.fromuserid ?? msgData.fromuserid ?? msgData.from ?? "");
+  const fromuser = String(
+    header?.fromuserid ?? msgData.fromuserid ?? msgData.from ?? msgData.fromid ?? "",
+  );
 
   // Extract message ID (priority: header.messageid > header.msgid > MsgId)
   const messageId = header?.messageid ?? header?.msgid ?? msgData.MsgId;

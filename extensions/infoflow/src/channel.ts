@@ -17,12 +17,13 @@ import {
 } from "./accounts.js";
 import { infoflowMessageActions } from "./actions.js";
 import { logVerbose } from "./logging.js";
+import { parseMarkdownForLocalImages } from "./markdown-local-images.js";
 import { prepareInfoflowImageBase64, sendInfoflowImageMessage } from "./media.js";
 import { startInfoflowMonitor } from "./monitor.js";
 import { getInfoflowRuntime } from "./runtime.js";
 import { sendInfoflowMessage } from "./send.js";
 import { normalizeInfoflowTarget, looksLikeInfoflowId } from "./targets.js";
-import type { ResolvedInfoflowAccount } from "./types.js";
+import type { InfoflowOutboundReply, ResolvedInfoflowAccount } from "./types.js";
 
 // Re-export types and account functions for external consumers
 export type { InfoflowAccountConfig, ResolvedInfoflowAccount } from "./types.js";
@@ -209,19 +210,83 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
     chunkerMode: "markdown",
     textChunkLimit: 2048,
     chunker: (text, limit) => getInfoflowRuntime().channel.text.chunkText(text, limit),
-    sendText: async ({ cfg, to, text, accountId }) => {
+    sendText: async ({ cfg, to, text, accountId, mediaLocalRoots, replyToId }) => {
       logVerbose(`[infoflow:sendText] to=${to}, accountId=${accountId}`);
-      // Use "markdown" type even though param is named `text`: LLM outputs are often markdown,
-      // and Infoflow's markdown type handles both plain text and markdown seamlessly.
-      const result = await sendInfoflowMessage({
-        cfg,
-        to,
-        contents: [{ type: "markdown", content: text }],
-        accountId: accountId ?? undefined,
-      });
+      const isGroup = /^group:\d+$/i.test(to.replace(/^infoflow:/i, ""));
+      const replyTo: InfoflowOutboundReply | undefined =
+        isGroup && replyToId?.trim() ? { messageid: replyToId.trim(), preview: "" } : undefined;
+
+      const segments = parseMarkdownForLocalImages(text);
+      let replyApplied = false;
+      let lastMessageId: string | undefined;
+
+      for (const segment of segments) {
+        if (segment.type === "text") {
+          const content = segment.content.trim();
+          if (!content) continue;
+          const result = await sendInfoflowMessage({
+            cfg,
+            to,
+            contents: [{ type: "markdown", content: segment.content }],
+            accountId: accountId ?? undefined,
+            replyTo: replyApplied ? undefined : replyTo,
+          });
+          if (result.ok) {
+            replyApplied = true;
+            lastMessageId = result.messageId;
+          }
+          continue;
+        }
+        // segment.type === "image"
+        try {
+          const prepared = await prepareInfoflowImageBase64({
+            mediaUrl: segment.content,
+            mediaLocalRoots: mediaLocalRoots ?? undefined,
+          });
+          if (prepared.isImage) {
+            const result = await sendInfoflowImageMessage({
+              cfg,
+              to,
+              base64Image: prepared.base64,
+              accountId: accountId ?? undefined,
+              replyTo: replyApplied ? undefined : replyTo,
+            });
+            if (result.ok) {
+              replyApplied = true;
+              lastMessageId = result.messageId;
+            }
+          } else {
+            const linkResult = await sendInfoflowMessage({
+              cfg,
+              to,
+              contents: [{ type: "link", content: segment.content }],
+              accountId: accountId ?? undefined,
+              replyTo: replyApplied ? undefined : replyTo,
+            });
+            if (linkResult.ok) {
+              replyApplied = true;
+              lastMessageId = linkResult.messageId;
+            }
+          }
+        } catch (err) {
+          logVerbose(`[infoflow:sendText] image prep failed, sending as link: ${err}`);
+          const linkResult = await sendInfoflowMessage({
+            cfg,
+            to,
+            contents: [{ type: "link", content: segment.content }],
+            accountId: accountId ?? undefined,
+            replyTo: replyApplied ? undefined : replyTo,
+          });
+          if (linkResult.ok) {
+            replyApplied = true;
+            lastMessageId = linkResult.messageId;
+          }
+        }
+      }
+
       return {
         channel: "infoflow",
-        messageId: result.ok ? (result.messageId ?? "sent") : "failed",
+        messageId: replyApplied ? (lastMessageId ?? "sent") : "failed",
       };
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId, mediaLocalRoots }) => {

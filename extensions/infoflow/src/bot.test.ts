@@ -271,12 +271,22 @@ describe("checkWatchRegex", () => {
   it("matches multi-line content with dotAll pattern", () => {
     const text = "iphone crash 报警 异常\ntestrisk=3";
     const pattern = "^(?=.*iphone)(?=.*crash)(?=.*异常).*$";
-    expect(checkWatchRegex(text, pattern)).toBe(true);
+    expect(checkWatchRegex(text, [pattern])).toBe(true);
+  });
+
+  it("returns true when any of multiple patterns matches", () => {
+    const text = "hello world";
+    expect(checkWatchRegex(text, ["nomatch", "world", "other"])).toBe(true);
+    expect(checkWatchRegex(text, ["nomatch", "other"])).toBe(false);
   });
 
   it("returns false when pattern is invalid", () => {
-    // An invalid regex should not throw and should return false.
-    expect(checkWatchRegex("test", "[")).toBe(false);
+    // Invalid regex is skipped; no match.
+    expect(checkWatchRegex("test", ["["])).toBe(false);
+  });
+
+  it("returns false for empty patterns", () => {
+    expect(checkWatchRegex("anything", [])).toBe(false);
   });
 });
 

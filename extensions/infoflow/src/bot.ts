@@ -6,7 +6,7 @@ import {
   recordPendingHistoryEntryIfEnabled,
   buildAgentMediaPayload,
 } from "openclaw/plugin-sdk";
-import { getAgentScopedMediaLocalRoots } from "../../../src/media/local-roots.js";
+import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/mattermost";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
@@ -107,13 +107,35 @@ function checkWatchMentioned(
   return undefined;
 }
 
-/** Check if message content matches the configured watchRegex regex pattern. Uses "s" (dotAll) so that . matches newlines in multi-line messages. */
-function checkWatchRegex(mes: string, pattern: string): boolean {
-  try {
-    return new RegExp(pattern, "is").test(mes);
-  } catch {
-    return false;
+/** Normalize watchRegex config to string[] (supports legacy single string). */
+function normalizeWatchRegex(v: string | string[] | undefined): string[] {
+  if (v == null) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
+/** Check if message content matches any of the configured watchRegex patterns. Uses "s" (dotAll) so that . matches newlines. */
+function checkWatchRegex(mes: string, patterns: string[]): boolean {
+  if (!patterns.length) return false;
+  for (const pattern of patterns) {
+    try {
+      if (new RegExp(pattern, "is").test(mes)) return true;
+    } catch {
+      // skip invalid pattern
+    }
   }
+  return false;
+}
+
+/** Return the first matching pattern index, or -1 if none match. Used for triggerReason and prompt. */
+function findMatchingWatchRegex(mes: string, patterns: string[]): number {
+  for (let i = 0; i < patterns.length; i++) {
+    try {
+      if (new RegExp(patterns[i], "is").test(mes)) return i;
+    } catch {
+      // skip invalid pattern
+    }
+  }
+  return -1;
 }
 
 /**
@@ -146,6 +168,12 @@ function extractMentionIds(bodyItems: InfoflowBodyItem[], robotName?: string): I
     }
   }
   return { userIds, agentIds };
+}
+
+/** Check if the message @mentions other bots or human users (excluding the bot itself). */
+function hasOtherMentions(mentionIds?: InfoflowMentionIds): boolean {
+  if (!mentionIds) return false;
+  return mentionIds.userIds.length > 0 || mentionIds.agentIds.length > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,9 +270,10 @@ function buildWatchMentionPrompt(mentionedId: string): string {
  * Build a GroupSystemPrompt for watch-content triggered messages.
  * Instructs the agent to reply only when confident, otherwise use NO_REPLY.
  */
-function buildWatchRegexPrompt(pattern: string): string {
+function buildWatchRegexPrompt(patterns: string[]): string {
+  const label = patterns.length ? `(${patterns.join(" | ")})` : "";
   return [
-    `The message content matched the configured watch pattern (${pattern}).`,
+    `The message content matched one of the configured watch patterns ${label}.`,
     "As the group assistant, you observed this message. Decide whether you can provide help or a valuable reply.",
     "",
     buildReplyJudgmentRules(),
@@ -301,6 +330,18 @@ function buildFollowUpPrompt(isReplyToBot: boolean): string {
 }
 
 /**
+ * Build a GroupSystemPrompt for follow-up messages that @mention another person or bot.
+ * Uses the conservative ReplyJudgmentRules since the message is likely directed at someone else.
+ */
+function buildFollowUpOtherMentionedPrompt(): string {
+  return [
+    "You recently replied in this group. A new message has arrived, but it @mentions another person or bot — it is likely directed at them, not at you.",
+    "",
+    buildReplyJudgmentRules(),
+  ].join("\n");
+}
+
+/**
  * Build a GroupSystemPrompt for proactive mode.
  * Instructs the agent to think about the message and reply when helpful.
  */
@@ -344,7 +385,7 @@ type ResolvedGroupConfig = {
   followUp: boolean;
   followUpWindow: number;
   watchMentions: string[];
-  watchRegex?: string;
+  watchRegex: string[];
   systemPrompt?: string;
 };
 
@@ -369,7 +410,7 @@ function resolveGroupConfig(
     followUp: groupCfg?.followUp ?? account.config.followUp ?? true,
     followUpWindow: groupCfg?.followUpWindow ?? account.config.followUpWindow ?? 300,
     watchMentions: groupCfg?.watchMentions ?? account.config.watchMentions ?? [],
-    watchRegex: groupCfg?.watchRegex ?? account.config.watchRegex,
+    watchRegex: normalizeWatchRegex(groupCfg?.watchRegex ?? account.config.watchRegex),
     systemPrompt: groupCfg?.systemPrompt,
   };
 }
@@ -817,8 +858,13 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           groupIdStr &&
           isWithinFollowUpWindow(groupIdStr, groupCfg.followUpWindow)
         ) {
-          triggerReason = "followUp";
-          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
+          if (hasOtherMentions(event.mentionIds)) {
+            triggerReason = "followUp-other-mentioned";
+            ctxPayload.GroupSystemPrompt = buildFollowUpOtherMentionedPrompt();
+          } else {
+            triggerReason = "followUp";
+            ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
+          }
         } else {
           if (groupIdStr) {
             logVerbose(
@@ -851,17 +897,26 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           triggerReason = `watchMentions(${matchedWatchId})`;
           // Watch-mention triggered: instruct agent to reply only if confident
           ctxPayload.GroupSystemPrompt = buildWatchMentionPrompt(matchedWatchId);
-        } else if (groupCfg.watchRegex && checkWatchRegex(mes, groupCfg.watchRegex)) {
-          triggerReason = `watchRegex(${groupCfg.watchRegex})`;
-          // Watch-content triggered: message matched configured regex pattern
+        } else if (groupCfg.watchRegex.length > 0 && checkWatchRegex(mes, groupCfg.watchRegex)) {
+          const idx = findMatchingWatchRegex(mes, groupCfg.watchRegex);
+          triggerReason =
+            idx >= 0
+              ? `watchRegex(${groupCfg.watchRegex[idx]})`
+              : `watchRegex(${groupCfg.watchRegex.join("|")})`;
+          // Watch-content triggered: message matched one of the configured regex patterns
           ctxPayload.GroupSystemPrompt = buildWatchRegexPrompt(groupCfg.watchRegex);
         } else if (
           groupCfg.followUp &&
           groupIdStr &&
           isWithinFollowUpWindow(groupIdStr, groupCfg.followUpWindow)
         ) {
-          triggerReason = "followUp";
-          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
+          if (hasOtherMentions(event.mentionIds)) {
+            triggerReason = "followUp-other-mentioned";
+            ctxPayload.GroupSystemPrompt = buildFollowUpOtherMentionedPrompt();
+          } else {
+            triggerReason = "followUp";
+            ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
+          }
         } else {
           if (groupIdStr) {
             logVerbose(
@@ -986,7 +1041,7 @@ export const _checkWatchMentioned = checkWatchMentioned;
 /** @internal — Extract non-bot mention IDs. Only exported for tests. */
 export const _extractMentionIds = extractMentionIds;
 
-/** @internal — Check watchRegex against message content (dotAll). Only exported for tests. */
+/** @internal — Check if message matches any watchRegex pattern (dotAll). Only exported for tests. */
 export const _checkWatchRegex = checkWatchRegex;
 
 /** @internal — Check if message is a reply to one of the bot's own messages. Only exported for tests. */

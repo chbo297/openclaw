@@ -22,7 +22,7 @@ export type InfoflowReplyMode =
 export type InfoflowGroupConfig = {
   replyMode?: InfoflowReplyMode;
   watchMentions?: string[];
-  watchRegex?: string;
+  watchRegex?: string[];
   followUp?: boolean;
   followUpWindow?: number;
   systemPrompt?: string;
@@ -116,7 +116,7 @@ export type InfoflowAccountConfig = {
    *  the bot analyzes the message and replies only if confident. */
   watchMentions?: string[];
   /** Regex pattern to watch for in message content; triggers bot activation when matched */
-  watchRegex?: string;
+  watchRegex?: string[];
   /** Reply mode controlling bot engagement level in groups */
   replyMode?: InfoflowReplyMode;
   /** Enable follow-up replies after bot responds to a mention (default: true) */
@@ -155,7 +155,7 @@ export type ResolvedInfoflowAccount = {
      *  the bot analyzes the message and replies only if confident. */
     watchMentions?: string[];
     /** Regex pattern to watch for in message content; triggers bot activation when matched */
-    watchRegex?: string;
+    watchRegex?: string[];
     /** Reply mode controlling bot engagement level in groups */
     replyMode?: InfoflowReplyMode;
     /** Enable follow-up replies after bot responds to a mention (default: true) */

@@ -6,10 +6,12 @@ import {
   recordPendingHistoryEntryIfEnabled,
   buildAgentMediaPayload,
 } from "openclaw/plugin-sdk";
+import { getAgentScopedMediaLocalRoots } from "../../../src/media/local-roots.js";
 import { resolveInfoflowAccount } from "./accounts.js";
 import { getInfoflowBotLog, formatInfoflowError, logVerbose } from "./logging.js";
 import { createInfoflowReplyDispatcher } from "./reply-dispatcher.js";
 import { getInfoflowRuntime } from "./runtime.js";
+import { findSentMessage } from "./sent-message-store.js";
 import type {
   InfoflowChatType,
   InfoflowMessageEvent,
@@ -46,6 +48,8 @@ type InfoflowBodyItem = {
   userid?: string;
   /** IMAGE 类型 body item 的图片下载地址 */
   downloadurl?: string;
+  /** replyData 类型 body item 中被引用消息的 ID */
+  messageid?: string | number;
 };
 
 /**
@@ -145,32 +149,63 @@ function extractMentionIds(bodyItems: InfoflowBodyItem[], robotName?: string): I
 }
 
 // ---------------------------------------------------------------------------
+// Reply-to-bot detection (引用回复机器人消息)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the message is a reply (引用回复) to one of the bot's own messages.
+ * Looks up replyData body items' messageid against the sent-message-store.
+ */
+function checkReplyToBot(bodyItems: InfoflowBodyItem[], accountId: string): boolean {
+  for (const item of bodyItems) {
+    if (item.type !== "replyData") continue;
+    const msgId = item.messageid;
+    if (msgId == null) continue;
+    const msgIdStr = String(msgId);
+    if (!msgIdStr) continue;
+    try {
+      const found = findSentMessage(accountId, msgIdStr);
+      if (found) return true;
+    } catch {
+      // DB lookup failure should not block message processing
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Shared reply judgment rules (reused across prompt builders)
 // ---------------------------------------------------------------------------
 
 /** Shared judgment rules and reply format requirements for all conditional-reply prompts */
 function buildReplyJudgmentRules(): string {
   return [
-    "# Rules",
+    "# Rules for Group Message Response",
     "",
-    "## Can answer or help → Reply directly",
+    "## When to Reply",
     "",
-    "Reply if ANY of these apply:",
-    "- The question can be answered through common sense or logical reasoning (e.g. math, general knowledge)",
-    "- You can find relevant clues or content in your knowledge base, documentation, or code",
-    "- You have sufficient domain expertise to provide a valuable reference",
+    "Reply if ANY of the following is true:",
+    "- The message is directed at you — either by explicit mention, or by contextual signals suggesting the user expects your response (e.g., a question following your previous reply, a topic clearly within your role, or conversational flow implying you are the intended recipient)",
+    "- The message contains a clear question or request that you can answer using your knowledge, skills, tools, or reasoning",
+    "- You have relevant domain expertise, documentation, or codebase context that adds value",
     "",
-    "## Cannot answer → Reply with NO_REPLY only",
+    "## When NOT to Reply — output only `NO_REPLY`",
     "",
-    "Do NOT reply if ANY of these apply:",
-    "- The message contains no clear question or request (e.g. casual chat, meaningless content)",
-    "- The question involves private information or context you have no knowledge of",
-    "- You cannot understand the core intent of the message",
+    "Do NOT reply if ANY of the following is true:",
+    "- The message is casual chatter, banter, emoji-only, or has no actionable question/request",
+    "- The user explicitly indicates they don't want your response",
+    "- The message is directed at another person, not at you",
+    "- You lack the context or knowledge to give a useful answer (e.g., private/internal info you don't have access to)",
+    "- The message intent is ambiguous and a wrong guess would be more disruptive than silence",
     "",
-    "# Response format",
+    "## Response Format",
     "",
-    "- When you can answer: give a direct, concise answer. Do not explain why you chose to answer.",
-    "- When you cannot answer: output only NO_REPLY with no other text.",
+    "- If you can answer: respond directly and concisely. Do not explain why you chose to answer. Do not add filler or pleasantries.",
+    "- If you cannot answer: output exactly `NO_REPLY` — nothing else, no explanation, no apology.",
+    "",
+    "## Guiding Principle",
+    "",
+    "When in doubt, prefer silence (`NO_REPLY`). A missing reply is far less disruptive than an irrelevant or incorrect one in a group chat.",
   ].join("\n");
 }
 
@@ -218,17 +253,51 @@ function buildWatchRegexPrompt(pattern: string): string {
 
 /**
  * Build a GroupSystemPrompt for follow-up replies after bot's last response.
- * Instructs the agent to reply only if the message is a follow-up on the same topic.
+ * Uses three-tier semantic priority: (1) intent to talk to bot → must reply,
+ * (2) explicit stop request → must not reply, (3) topic continuity judgment.
+ *
+ * When isReplyToBot is true, injects a strong signal that the user quoted the bot's message.
  */
-function buildFollowUpPrompt(): string {
-  return [
+function buildFollowUpPrompt(isReplyToBot: boolean): string {
+  const lines: string[] = [
     "You just replied to a message in this group. Someone has now sent a new message.",
-    "First determine if this message is a follow-up or continuation of the same topic you previously replied to, then decide if you can continue to help.",
+    "Follow the priority rules below **in order** to decide whether to reply.",
     "",
-    "Note: If this message is clearly a new topic or unrelated to your previous reply, respond with NO_REPLY.",
+  ];
+
+  if (isReplyToBot) {
+    lines.push(
+      "**Important context: this message is a quoted reply to your previous message. This is a strong signal that the user is following up with you.**",
+      "",
+    );
+  }
+
+  lines.push(
+    "# Priority 1: The sender intends to talk to you → MUST reply",
+    "",
+    "Based on semantic analysis, if the sender shows ANY of the following intents or expectations, you **MUST** reply (do NOT output NO_REPLY):",
+    "- Asking a follow-up question about your previous answer (e.g. 'why?', 'what else?', 'what if...?')",
+    "- Quoted/replied to your message (indicating a conversation with you)",
+    "- Addressing you by name, or using words like 'bot', 'assistant', etc.",
+    "- Requesting you to do something (e.g. 'help me...', 'explain...', 'translate...')",
+    "- Semantically expects a reply from you",
+    "",
+    "# Priority 2: Explicitly asking you to stop → MUST NOT reply",
+    "",
+    "If the message explicitly tells you to stop replying (e.g. 'shut up', 'stop', 'don't reply',",
+    "'no need for bot', or equivalent expressions in any language),",
+    "output only NO_REPLY.",
+    "",
+    "# Priority 3: No explicit intent → Judge topic continuity",
+    "",
+    "If neither Priority 1 nor Priority 2 applies:",
+    "- If the message continues the same topic you previously replied to, and you can provide valuable help → reply.",
+    "- If it is a new/unrelated topic, or you cannot add value → output only NO_REPLY.",
     "",
     buildReplyJudgmentRules(),
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 /**
@@ -479,6 +548,9 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   // Extract sender name from header or fallback to fromuser
   const senderName = String(header?.username ?? header?.nickname ?? msgData.username ?? fromuser);
 
+  // Detect reply-to-bot: check if any replyData item quotes a bot-sent message
+  const isReplyToBot = replyContext ? checkReplyToBot(bodyItems, accountId) : false;
+
   // Delegate to the common message handler (group chat)
   await handleInfoflowMessage({
     cfg,
@@ -496,6 +568,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
       mentionIds:
         mentionIds.userIds.length > 0 || mentionIds.agentIds.length > 0 ? mentionIds : undefined,
       replyContext,
+      isReplyToBot: isReplyToBot || undefined,
       imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
     },
     accountId,
@@ -745,7 +818,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           isWithinFollowUpWindow(groupIdStr, groupCfg.followUpWindow)
         ) {
           triggerReason = "followUp";
-          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt();
+          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
         } else {
           if (groupIdStr) {
             logVerbose(
@@ -788,8 +861,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
           isWithinFollowUpWindow(groupIdStr, groupCfg.followUpWindow)
         ) {
           triggerReason = "followUp";
-          // Follow-up window: let LLM decide if this is a follow-up
-          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt();
+          ctxPayload.GroupSystemPrompt = buildFollowUpPrompt(event.isReplyToBot === true);
         } else {
           if (groupIdStr) {
             logVerbose(
@@ -870,6 +942,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     // Pass inbound messageId for outbound reply-to (group only)
     replyToMessageId: isGroup ? event.messageId : undefined,
     replyToPreview: isGroup ? mes : undefined,
+    mediaLocalRoots: getAgentScopedMediaLocalRoots(cfg, route.agentId),
   });
 
   const dispatchResult = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -915,3 +988,6 @@ export const _extractMentionIds = extractMentionIds;
 
 /** @internal — Check watchRegex against message content (dotAll). Only exported for tests. */
 export const _checkWatchRegex = checkWatchRegex;
+
+/** @internal — Check if message is a reply to one of the bot's own messages. Only exported for tests. */
+export const _checkReplyToBot = checkReplyToBot;

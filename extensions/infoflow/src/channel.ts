@@ -218,23 +218,22 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
 
       const segments = parseMarkdownForLocalImages(text);
       let replyApplied = false;
-      let lastMessageId: string | undefined;
+      const sendPromises: Promise<{ ok?: boolean; messageId?: string }>[] = [];
 
       for (const segment of segments) {
         if (segment.type === "text") {
           const content = segment.content.trim();
           if (!content) continue;
-          const result = await sendInfoflowMessage({
-            cfg,
-            to,
-            contents: [{ type: "markdown", content: segment.content }],
-            accountId: accountId ?? undefined,
-            replyTo: replyApplied ? undefined : replyTo,
-          });
-          if (result.ok) {
-            replyApplied = true;
-            lastMessageId = result.messageId;
-          }
+          sendPromises.push(
+            sendInfoflowMessage({
+              cfg,
+              to,
+              contents: [{ type: "markdown", content: segment.content }],
+              accountId: accountId ?? undefined,
+              replyTo: replyApplied ? undefined : replyTo,
+            }),
+          );
+          replyApplied = true;
           continue;
         }
         // segment.type === "image"
@@ -244,49 +243,51 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
             mediaLocalRoots: mediaLocalRoots ?? undefined,
           });
           if (prepared.isImage) {
-            const result = await sendInfoflowImageMessage({
-              cfg,
-              to,
-              base64Image: prepared.base64,
-              accountId: accountId ?? undefined,
-              replyTo: replyApplied ? undefined : replyTo,
-            });
-            if (result.ok) {
-              replyApplied = true;
-              lastMessageId = result.messageId;
-            }
+            sendPromises.push(
+              sendInfoflowImageMessage({
+                cfg,
+                to,
+                base64Image: prepared.base64,
+                accountId: accountId ?? undefined,
+                replyTo: replyApplied ? undefined : replyTo,
+              }),
+            );
+            replyApplied = true;
           } else {
-            const linkResult = await sendInfoflowMessage({
+            sendPromises.push(
+              sendInfoflowMessage({
+                cfg,
+                to,
+                contents: [{ type: "link", content: segment.content }],
+                accountId: accountId ?? undefined,
+                replyTo: replyApplied ? undefined : replyTo,
+              }),
+            );
+            replyApplied = true;
+          }
+        } catch (err) {
+          logVerbose(`[infoflow:sendText] image prep failed, sending as link: ${err}`);
+          sendPromises.push(
+            sendInfoflowMessage({
               cfg,
               to,
               contents: [{ type: "link", content: segment.content }],
               accountId: accountId ?? undefined,
               replyTo: replyApplied ? undefined : replyTo,
-            });
-            if (linkResult.ok) {
-              replyApplied = true;
-              lastMessageId = linkResult.messageId;
-            }
-          }
-        } catch (err) {
-          logVerbose(`[infoflow:sendText] image prep failed, sending as link: ${err}`);
-          const linkResult = await sendInfoflowMessage({
-            cfg,
-            to,
-            contents: [{ type: "link", content: segment.content }],
-            accountId: accountId ?? undefined,
-            replyTo: replyApplied ? undefined : replyTo,
-          });
-          if (linkResult.ok) {
-            replyApplied = true;
-            lastMessageId = linkResult.messageId;
-          }
+            }),
+          );
+          replyApplied = true;
         }
       }
 
+      if (sendPromises.length === 0) {
+        return { channel: "infoflow", messageId: "failed" };
+      }
+      const results = await Promise.all(sendPromises);
+      const lastOk = results.filter((r) => r?.ok).at(-1);
       return {
         channel: "infoflow",
-        messageId: replyApplied ? (lastMessageId ?? "sent") : "failed",
+        messageId: lastOk ? (lastOk.messageId ?? "sent") : "failed",
       };
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId, mediaLocalRoots }) => {
@@ -337,9 +338,11 @@ export const infoflowPlugin: ChannelPlugin<ResolvedInfoflowAccount> = {
         return { ok: linkResult.ok, messageId: linkResult.messageId };
       };
 
-      // Dispatch: concurrent text + image, or text-only, or image-only
+      // b-mode: fire in upstream order (caption first, then media), then await all
       if (trimmedText && mediaUrl) {
-        const [, imageResult] = await Promise.all([sendText(), sendImage()]);
+        const p1 = sendText();
+        const p2 = sendImage();
+        const [, imageResult] = await Promise.all([p1, p2]);
         return {
           channel: "infoflow",
           messageId: imageResult.ok ? (imageResult.messageId ?? "sent") : "failed",

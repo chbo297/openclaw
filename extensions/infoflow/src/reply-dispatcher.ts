@@ -155,6 +155,7 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
       // Chunk text to 2048 chars max (Infoflow limit)
       const chunks = core.channel.text.chunkText(messageText, 2048);
       let isFirstChunk = true;
+      const textPromises: Promise<{ ok?: boolean; error?: string }>[] = [];
 
       for (const chunk of chunks) {
         const segments = parseMarkdownForLocalImages(chunk);
@@ -177,21 +178,16 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
             const trimmed = segment.content.trim();
             if (contents.length > 0 || trimmed) {
               contents.push({ type: "markdown", content: segment.content });
-              const result = await sendInfoflowMessage({
-                cfg,
-                to,
-                contents,
-                accountId,
-                replyTo: chunkReplyTo,
-              });
+              textPromises.push(
+                sendInfoflowMessage({
+                  cfg,
+                  to,
+                  contents,
+                  accountId,
+                  replyTo: chunkReplyTo,
+                }),
+              );
               if (chunkReplyTo) replyApplied = true;
-              if (result.ok) {
-                statusSink?.({ lastOutboundAt: Date.now() });
-              } else if (result.error) {
-                getInfoflowSendLog().error(
-                  `[infoflow] reply failed to=${to}, accountId=${accountId}: ${result.error}`,
-                );
-              }
             }
             isFirstChunk = false;
             continue;
@@ -205,13 +201,15 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
             if (hasAtAgents)
               atContents.push({ type: "at-agent", content: resolvedAgentIds.join(",") });
             atContents.push({ type: "markdown", content: "" });
-            await sendInfoflowMessage({
-              cfg,
-              to,
-              contents: atContents,
-              accountId,
-              replyTo: chunkReplyTo,
-            });
+            textPromises.push(
+              sendInfoflowMessage({
+                cfg,
+                to,
+                contents: atContents,
+                accountId,
+                replyTo: chunkReplyTo,
+              }),
+            );
             if (chunkReplyTo) replyApplied = true;
           }
           isFirstChunk = false;
@@ -222,71 +220,131 @@ export function createInfoflowReplyDispatcher(params: CreateInfoflowReplyDispatc
               mediaLocalRoots: mediaLocalRoots ?? undefined,
             });
             if (prepared.isImage) {
-              const result = await sendInfoflowImageMessage({
-                cfg,
-                to,
-                base64Image: prepared.base64,
-                accountId,
-                replyTo: !replyApplied ? replyTo : undefined,
-              });
-              if (result.ok) {
-                if (!replyApplied) replyApplied = true;
-                statusSink?.({ lastOutboundAt: Date.now() });
-                continue;
-              }
-              logVerbose(
-                `[infoflow] native image send failed: ${result.error}, falling back to link`,
+              const segmentReplyTo = !replyApplied ? replyTo : undefined;
+              textPromises.push(
+                sendInfoflowImageMessage({
+                  cfg,
+                  to,
+                  base64Image: prepared.base64,
+                  accountId,
+                  replyTo: segmentReplyTo,
+                }).then((r) => {
+                  if (r.ok) return r;
+                  logVerbose(
+                    `[infoflow] native image send failed: ${r.error}, falling back to link`,
+                  );
+                  return sendInfoflowMessage({
+                    cfg,
+                    to,
+                    contents: [{ type: "link", content: segment.content }],
+                    accountId,
+                    replyTo: segmentReplyTo,
+                  });
+                }),
               );
+              if (!replyApplied) replyApplied = true;
+            } else {
+              textPromises.push(
+                sendInfoflowMessage({
+                  cfg,
+                  to,
+                  contents: [{ type: "link", content: segment.content }],
+                  accountId,
+                  replyTo: !replyApplied ? replyTo : undefined,
+                }),
+              );
+              if (!replyApplied) replyApplied = true;
             }
           } catch (err) {
             logVerbose(
               `[infoflow] image prep failed in text segment, falling back to link: ${err}`,
             );
+            textPromises.push(
+              sendInfoflowMessage({
+                cfg,
+                to,
+                contents: [{ type: "link", content: segment.content }],
+                accountId,
+                replyTo: !replyApplied ? replyTo : undefined,
+              }),
+            );
+            if (!replyApplied) replyApplied = true;
           }
-          await sendInfoflowMessage({
-            cfg,
-            to,
-            contents: [{ type: "link", content: segment.content }],
-            accountId,
-            replyTo: !replyApplied ? replyTo : undefined,
-          });
-          if (!replyApplied) replyApplied = true;
+        }
+      }
+
+      if (textPromises.length > 0) {
+        const results = await Promise.all(textPromises);
+        for (const result of results) {
+          if (result?.ok) {
+            statusSink?.({ lastOutboundAt: Date.now() });
+          } else if (result?.error) {
+            getInfoflowSendLog().error(
+              `[infoflow] reply failed to=${to}, accountId=${accountId}: ${result.error}`,
+            );
+          }
         }
       }
     }
 
-    // --- Media handling: send each media item as native image or fallback link ---
+    // --- Media handling: send each media item as native image or fallback link (b-mode: collect then await) ---
+    const mediaPromises: Promise<{ ok?: boolean; error?: string }>[] = [];
     for (const mediaUrl of mediaList) {
       const mediaReplyTo = !replyApplied ? replyTo : undefined;
       try {
         const prepared = await prepareInfoflowImageBase64({ mediaUrl });
         if (prepared.isImage) {
-          const result = await sendInfoflowImageMessage({
-            cfg,
-            to,
-            base64Image: prepared.base64,
-            accountId,
-            replyTo: mediaReplyTo,
-          });
-          if (result.ok) {
-            if (mediaReplyTo) replyApplied = true;
-            statusSink?.({ lastOutboundAt: Date.now() });
-            continue;
-          }
-          logVerbose(`[infoflow] native image send failed: ${result.error}, falling back to link`);
+          mediaPromises.push(
+            sendInfoflowImageMessage({
+              cfg,
+              to,
+              base64Image: prepared.base64,
+              accountId,
+              replyTo: mediaReplyTo,
+            }).then((r) => {
+              if (r.ok) return r;
+              logVerbose(`[infoflow] native image send failed: ${r.error}, falling back to link`);
+              return sendInfoflowMessage({
+                cfg,
+                to,
+                contents: [{ type: "link", content: mediaUrl }],
+                accountId,
+                replyTo: mediaReplyTo,
+              });
+            }),
+          );
+          if (mediaReplyTo) replyApplied = true;
+        } else {
+          mediaPromises.push(
+            sendInfoflowMessage({
+              cfg,
+              to,
+              contents: [{ type: "link", content: mediaUrl }],
+              accountId,
+              replyTo: mediaReplyTo,
+            }),
+          );
+          if (mediaReplyTo) replyApplied = true;
         }
       } catch (err) {
         logVerbose(`[infoflow] image prep failed, falling back to link: ${err}`);
+        mediaPromises.push(
+          sendInfoflowMessage({
+            cfg,
+            to,
+            contents: [{ type: "link", content: mediaUrl }],
+            accountId,
+            replyTo: mediaReplyTo,
+          }),
+        );
+        if (mediaReplyTo) replyApplied = true;
       }
-      // Fallback: send as link
-      await sendInfoflowMessage({
-        cfg,
-        to,
-        contents: [{ type: "link", content: mediaUrl }],
-        accountId,
-        replyTo: mediaReplyTo,
-      });
-      if (mediaReplyTo) replyApplied = true;
+    }
+    if (mediaPromises.length > 0) {
+      const results = await Promise.all(mediaPromises);
+      for (const result of results) {
+        if (result?.ok) statusSink?.({ lastOutboundAt: Date.now() });
+      }
     }
   };
 

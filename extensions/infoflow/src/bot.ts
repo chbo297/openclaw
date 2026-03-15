@@ -194,132 +194,6 @@ function hasOtherMentions(mentionIds?: InfoflowMentionIds): boolean {
   return mentionIds.userIds.length > 0 || mentionIds.agentIds.length > 0;
 }
 
-/** True if this AT item is an "other" mention (another bot or another human), not this bot. */
-function isOtherMentionItem(item: InfoflowBodyItem, agentIdSet: Set<number>): boolean {
-  if (item.type !== "AT") return false;
-  if (item.robotid != null && agentIdSet.has(item.robotid)) return true;
-  if (item.userid) return true;
-  return false;
-}
-
-/**
- * Concatenate text content from body items before the first AT.
- * Used to decide whether to add "对 xxx 说：" prefix (only when this text, stripped, has length <= 4).
- */
-function getTextBeforeFirstAt(bodyItems: InfoflowBodyItem[] | undefined): string {
-  if (!bodyItems?.length) return "";
-  let out = "";
-  for (const item of bodyItems) {
-    if (item.type === "AT") break;
-    if (item.type === "TEXT" || item.type === "MD") out += item.content ?? "";
-  }
-  return out;
-}
-
-/**
- * Display names for leading consecutive "other" ATs (name only; used for "对 xxx 说：").
- * Returns null if there are no leading other ATs.
- */
-function getLeadingOtherMentionNames(
-  bodyItems: InfoflowBodyItem[] | undefined,
-  mentionIds: InfoflowMentionIds | undefined,
-): string | null {
-  if (!bodyItems?.length || !mentionIds) return null;
-  const agentIdSet = new Set(mentionIds.agentIds);
-  const names: string[] = [];
-  for (const item of bodyItems) {
-    if (item.type !== "AT") break;
-    if (!isOtherMentionItem(item, agentIdSet)) continue;
-    const label =
-      item.name?.trim() || (item.robotid != null ? `ID ${item.robotid}` : (item.userid ?? ""));
-    if (label) names.push(label);
-  }
-  return names.length > 0 ? names.join("、") : null;
-}
-
-/**
- * Full label for leading "other" ATs in same format as bodyForAgent (e.g. "地图不打烊 (robotid:4105001326)").
- * Used to build "对 xxx 说: rest" so the model sees the same identifier.
- */
-function getLeadingOtherMentionLabelFull(
-  bodyItems: InfoflowBodyItem[] | undefined,
-  mentionIds: InfoflowMentionIds | undefined,
-): string | null {
-  if (!bodyItems?.length || !mentionIds) return null;
-  const agentIdSet = new Set(mentionIds.agentIds);
-  const labels: string[] = [];
-  for (const item of bodyItems) {
-    if (item.type !== "AT") break;
-    if (!isOtherMentionItem(item, agentIdSet)) continue;
-    const label =
-      item.robotid != null
-        ? `${item.name?.trim() ?? "ID"} (robotid:${item.robotid})`
-        : item.userid
-          ? item.name?.trim()
-            ? `${item.name} (${item.userid})`
-            : item.userid
-          : (item.name?.trim() ?? "");
-    if (label) labels.push(label);
-  }
-  return labels.length > 0 ? labels.join("、") : null;
-}
-
-/**
- * Content after the leading "other" ATs (TEXT/MD concatenation from bodyItems).
- */
-function getRestAfterLeadingOtherAts(
-  bodyItems: InfoflowBodyItem[] | undefined,
-  mentionIds: InfoflowMentionIds | undefined,
-): string {
-  if (!bodyItems?.length || !mentionIds) return "";
-  const agentIdSet = new Set(mentionIds.agentIds);
-  let i = 0;
-  while (
-    i < bodyItems.length &&
-    bodyItems[i].type === "AT" &&
-    isOtherMentionItem(bodyItems[i], agentIdSet)
-  ) {
-    i++;
-  }
-  let out = "";
-  for (; i < bodyItems.length; i++) {
-    const item = bodyItems[i];
-    if (item.type === "TEXT" || item.type === "MD") out += item.content ?? "";
-  }
-  return out.trimStart();
-}
-
-/** Strip whitespace and punctuation to measure "content" length (for ≤4 check). */
-function stripPunctuationAndWhitespace(s: string): string {
-  return s.replace(/\s/g, "").replace(/[\p{P}\p{S}]/gu, "");
-}
-
-/**
- * Get human-readable "name (ID)" for each other-mentioned entity (bot or human) from body items.
- * Used in followUp-other-mentioned to inject an explicit reminder so the LLM does not
- * confuse itself with the @mentioned person/bot (e.g. "你" in "@地图不打烊 你讲个笑话" refers to 地图不打烊).
- */
-function getOtherMentionedDisplayNames(
-  bodyItems: InfoflowBodyItem[] | undefined,
-  mentionIds: InfoflowMentionIds | undefined,
-): string[] {
-  if (!bodyItems?.length || !mentionIds) return [];
-  const agentIdSet = new Set(mentionIds.agentIds);
-  const userIdSetLower = new Set(mentionIds.userIds.map((id) => id.toLowerCase()));
-  const names: string[] = [];
-  for (const item of bodyItems) {
-    if (item.type !== "AT") continue;
-    if (item.robotid != null && agentIdSet.has(item.robotid)) {
-      const label = item.name?.trim() ? `${item.name} (ID ${item.robotid})` : `ID ${item.robotid}`;
-      names.push(label);
-    } else if (item.userid && userIdSetLower.has(item.userid.toLowerCase())) {
-      const label = item.name?.trim() ? `${item.name} (${item.userid})` : item.userid;
-      names.push(label);
-    }
-  }
-  return [...new Set(names)];
-}
-
 /**
  * When in follow-up window and message has other @mentions (not this bot): record only and
  * return "record_only" (no LLM dispatch). Otherwise return "dispatch".
@@ -503,89 +377,6 @@ function buildFollowUpPrompt(isReplyToBot: boolean): string {
   );
 
   return lines.join("\n");
-}
-
-/**
- * Build a GroupSystemPrompt for follow-up messages that @mention another person or bot.
- * Default NO_REPLY; reply only when the message is clearly directed at the bot, not the @mentioned.
- */
-function buildFollowUpOtherMentionedPrompt(): string {
-  return [
-    "You were NOT @mentioned in this message. The @ refers to another person or bot, not you.",
-    "You recently replied in this group. A new message has arrived, but it @mentions someone else.",
-    "",
-    "# Core Principle",
-    "",
-    "Default: NO_REPLY. The @mention almost certainly means the sender is talking to THEM, not you.",
-    "",
-    "# Analysis Steps",
-    "",
-    "## Step 1: Strip pronouns to reveal true structure",
-    "",
-    "Rewrite the message by removing all instances of 你/您 (or 'you' in English).",
-    "Compare the original and the stripped version:",
-    "- If the stripped version still makes sense as a command/question directed at the @mentioned person → the 你 was addressing them.",
-    "  Original:  '@lisi 你来看看这个接口为什么报错'",
-    "  Stripped:  '@lisi 来看看这个接口为什么报错'",
-    "  → Meaning unchanged. 你 = @lisi. NOT you.",
-    "",
-    "- If removing 你 breaks a clause that has NO syntactic connection to the @mention → that 你 MIGHT address you.",
-    "  Original:  '工程部负责人是 @zhangsan，我去找他了，你还有什么要说的吗'",
-    "  Stripped:  '工程部负责人是 @zhangsan，我去找他了，还有什么要说的吗'",
-    "  → The last clause loses its subject; it was a separate question directed at you (continuing prior conversation). 你 = you.",
-    "",
-    "## Step 2: Identify the action and intended performer",
-    "",
-    "Based on the stripped message, determine:",
-    "- What ACTION does the sender want performed?",
-    "- WHO is expected to perform it — the @mentioned person, the sender themselves, or you?",
-    "",
-    "## Step 3: Decide",
-    "",
-    "- If Step 1 shows all 你 refer to the @mentioned person → NO_REPLY.",
-    "- If Step 1 is ambiguous → NO_REPLY. Do not guess.",
-    "- If Step 1 clearly shows a 你 addressing you, AND Step 2 confirms the sender is directing speech at you → REPLY.",
-    "",
-    "# Decision Rules",
-    "",
-    "## NO_REPLY (default, ~95% of cases)",
-    "",
-    "Output NO_REPLY if ANY is true:",
-    "- The sender is talking to / assigning to / asking the @mentioned person",
-    "- You cannot confidently determine who 你 refers to",
-    "- The message is casual chat or social coordination with the @mentioned person",
-    "",
-    "Examples:",
-    "  '@lisi 你觉得呢'",
-    "  Strip → '@lisi 觉得呢' → still a question to @lisi. → NO_REPLY.",
-    "",
-    "  '这个问题 @lisi 你和他都看看吧'",
-    "  Strip → '这个问题 @lisi 和他都看看吧' → task assigned to @lisi+他. 你=@lisi. → NO_REPLY.",
-    "",
-    "  '@lisi 你从日志开始排查一下'",
-    "  Strip → '@lisi 从日志开始排查一下' → debug task to @lisi. → NO_REPLY.",
-    "",
-    "## REPLY (requires BOTH conditions)",
-    "",
-    "Reply ONLY when BOTH are confirmed:",
-    "  (a) The @mention is informational (a name, a reference), not the addressee",
-    "  (b) The sender is clearly directing speech at you (continuing your conversation, asking you a question)",
-    "",
-    "Example:",
-    "  Prior context — you said: '这个事情需要找隔壁工程部门的人'",
-    "  New message: '好的，工程部门负责人是 @zhangsan，我去找他了，你还有什么要说的吗'",
-    "  Strip → '好的，工程部门负责人是 @zhangsan，我去找他了，还有什么要说的吗'",
-    "  → @zhangsan is referenced as info. The orphaned clause continues YOUR conversation. → REPLY.",
-    "",
-    "## Emergency Override (rare)",
-    "",
-    "Interject even if the message targets the @mentioned person ONLY when:",
-    "- The suggested action would cause SEVERE, hard-to-reverse damage (production data loss, security breach, financial loss)",
-    "- Silence would be irresponsible",
-    "",
-    "  '@lisi 你直接把线上数据库的表 drop 掉重建就行了' → REPLY. Production data loss risk.",
-    "  '@lisi 你用 println 打个日志看看吧' → NO_REPLY. Harmless.",
-  ].join("\n");
 }
 
 /**
@@ -1304,27 +1095,6 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
   // Build unified target: "group:<id>" for group chat, username for private chat
   const to = isGroup && groupId !== undefined ? `group:${groupId}` : fromuser;
 
-  // When followUp-other-mentioned: if text before first AT (stripped) has length <= 4, replace
-  // the current message with "对 xxx 说: rest" so the envelope stays and only the message line changes.
-  if (isGroup && triggerReason === "followUp-other-mentioned") {
-    const textBeforeFirstAt = getTextBeforeFirstAt(event.bodyItems);
-    const stripped = stripPunctuationAndWhitespace(textBeforeFirstAt);
-    if (stripped.length <= 4) {
-      const leadingLabelFull = getLeadingOtherMentionLabelFull(event.bodyItems, event.mentionIds);
-      if (leadingLabelFull) {
-        const rest = getRestAfterLeadingOtherAts(event.bodyItems, event.mentionIds);
-        const newBodyForAgent = `对 ${leadingLabelFull} 说: ${rest}`;
-        const lastIdx = ctxPayload.Body.lastIndexOf(bodyForAgent);
-        if (lastIdx !== -1) {
-          ctxPayload.Body =
-            ctxPayload.Body.slice(0, lastIdx) +
-            newBodyForAgent +
-            ctxPayload.Body.slice(lastIdx + bodyForAgent.length);
-        }
-      }
-    }
-  }
-
   // Provide mention context to the LLM so it can decide who to @mention
   if (isGroup && event.mentionIds) {
     const parts: string[] = [];
@@ -1335,31 +1105,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
       parts.push(`Bot IDs: ${event.mentionIds.agentIds.join(", ")}`);
     }
     if (parts.length > 0) {
-      const notYouHint =
-        triggerReason === "followUp-other-mentioned"
-          ? " Others @mentioned in this message (not you):"
-          : " @mentioned in group:";
-      ctxPayload.Body += `\n\n[System:${notYouHint} ${parts.join("; ")}. To @mention someone in your reply, use the @id format]`;
-      // In followUp-other-mentioned, tell the model who it is and who was @mentioned so it does not
-      // confuse itself (e.g. "你" in "@地图不打烊 你讲个笑话" refers to 地图不打烊, not this bot).
-      if (triggerReason === "followUp-other-mentioned") {
-        const robotName = account.config.robotName?.trim();
-        const robotId = account.config.robotId?.trim();
-        const youAre =
-          robotName && robotId
-            ? `You are ${robotName} (ID ${robotId}). `
-            : robotName
-              ? `You are ${robotName}. `
-              : "";
-        const otherNames = getOtherMentionedDisplayNames(event.bodyItems, event.mentionIds);
-        if (youAre || otherNames.length > 0) {
-          const rest =
-            otherNames.length > 0
-              ? `The only @mentioned in this message: ${otherNames.join(", ")}. You are NOT that bot/person. Any "你/您" in the message refers to them. Default: NO_REPLY.`
-              : "Default: NO_REPLY.";
-          ctxPayload.Body += `\n[System: ${youAre}${rest}]`;
-        }
-      }
+      ctxPayload.Body += `\n\n[System: @mentioned in group: ${parts.join("; ")}. To @mention someone in your reply, use the @id format]`;
     }
   }
 
@@ -1444,9 +1190,3 @@ export const _checkWatchRegex = checkWatchRegex;
 
 /** @internal — Check if message is a reply to one of the bot's own messages. Only exported for tests. */
 export const _checkReplyToBot = checkReplyToBot;
-
-/** @internal — Text before first AT (for "对 xxx 说：" prefix condition). Only exported for tests. */
-export const _getTextBeforeFirstAt = getTextBeforeFirstAt;
-
-/** @internal — Leading other AT display names for "对 xxx 说：". Only exported for tests. */
-export const _getLeadingOtherMentionNames = getLeadingOtherMentionNames;

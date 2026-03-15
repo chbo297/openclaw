@@ -483,6 +483,21 @@ export async function handlePrivateChatMessage(params: HandlePrivateChatParams):
 export async function handleGroupChatMessage(params: HandleGroupChatParams): Promise<void> {
   const { cfg, msgData, accountId, statusSink } = params;
 
+  logVerbose(`[infoflow] group chat: raw msgData: ${JSON.stringify(msgData)}`);
+
+  // Ignore our own bot messages: when fromid and agentid are both set, the message was sent by a bot.
+  // If agentid matches this account's appAgentId, it is our own message (e.g. server may echo with different messageid).
+  const fromid = msgData.fromid;
+  const agentid = msgData.agentid;
+  if (fromid != null && fromid !== "" && agentid != null && agentid !== "") {
+    const account = resolveInfoflowAccount({ cfg, accountId });
+    const appAgentId = account.config.appAgentId;
+    if (appAgentId != null && Number(agentid) === appAgentId) {
+      logVerbose(`[infoflow] group chat: ignoring own bot message (agentid=${agentid})`);
+      return;
+    }
+  }
+
   // Extract sender from nested structure or flat fields.
   // Some Infoflow events (including bot-authored forwards) only populate `fromid` on the root,
   // so include msgData.fromid as a final fallback.
@@ -504,10 +519,6 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   // Extract timestamp (time is in milliseconds)
   const rawTime = msgData.time ?? header?.servertime;
   const timestamp = rawTime != null ? Number(rawTime) : Date.now();
-
-  logVerbose(
-    `[infoflow] group chat: fromuser=${fromuser}, groupid=${groupid}, raw msgData: ${JSON.stringify(msgData)}`,
-  );
 
   if (!fromuser) {
     return;

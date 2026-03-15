@@ -597,9 +597,11 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   // Extract non-bot mention IDs (userIds + agentIds) for LLM-driven @mentions
   const mentionIds = extractMentionIds(bodyItems, robotName);
 
-  // Build two versions: mes (for CommandBody, no @xxx) and rawMes (for RawBody, with @xxx)
+  // Build three versions: mes (for CommandBody, no @xxx), rawMes (for RawBody, with @xxx),
+  // and bodyForAgent (for LLM: @name with robotid when present so model sees "@地图不打烊 (robotid:N)")
   let textContent = "";
   let rawTextContent = "";
+  let agentVisibleText = "";
   const replyContextItems: string[] = [];
   const imageUrls: string[] = [];
   if (Array.isArray(bodyItems)) {
@@ -613,17 +615,21 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
       } else if (item.type === "TEXT" || item.type === "MD") {
         textContent += item.content ?? "";
         rawTextContent += item.content ?? "";
+        agentVisibleText += item.content ?? "";
       } else if (item.type === "LINK") {
         const label = item.label ?? "";
         if (label) {
           textContent += ` ${label} `;
           rawTextContent += ` ${label} `;
+          agentVisibleText += ` ${label} `;
         }
       } else if (item.type === "AT") {
-        // AT elements only go into rawTextContent, not textContent
+        // AT elements only go into rawTextContent and agentVisibleText, not textContent
         const name = item.name ?? "";
         if (name) {
           rawTextContent += `@${name} `;
+          agentVisibleText +=
+            item.robotid != null ? `@${name} (robotid:${item.robotid}) ` : `@${name} `;
         }
       } else if (item.type === "IMAGE") {
         // 提取图片下载地址
@@ -635,6 +641,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
         // Fallback: for any other item types with string content, treat content as text.
         textContent += item.content;
         rawTextContent += item.content;
+        agentVisibleText += item.content;
       }
     }
   }
@@ -655,6 +662,8 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
   if (!mes && replyContext) {
     mes = "(引用回复)";
   }
+  // Body for LLM: include @mentions with robotid so model sees e.g. "@地图不打烊 (robotid:N)"
+  const bodyForAgent = agentVisibleText.trim() || rawMes || mes;
 
   // Extract sender name from header or fallback to fromuser
   const senderName = String(header?.username ?? header?.nickname ?? msgData.username ?? fromuser);
@@ -669,6 +678,7 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
       fromuser,
       mes,
       rawMes,
+      bodyForAgent,
       chatType: "group",
       groupId: groupid,
       senderName,
@@ -694,6 +704,8 @@ export async function handleGroupChatMessage(params: HandleGroupChatParams): Pro
 export async function handleInfoflowMessage(params: HandleInfoflowMessageParams): Promise<void> {
   const { cfg, event, accountId, statusSink } = params;
   const { fromuser, mes, chatType, groupId, senderName } = event;
+  // Single source for "body shown to LLM": already computed in group handler (line ~666)
+  const bodyForAgent = event.bodyForAgent ?? mes;
 
   const account = resolveInfoflowAccount({ cfg, accountId });
   const core = getInfoflowRuntime();
@@ -741,7 +753,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     timestamp: Date.now(),
     previousTimestamp,
     envelope: envelopeOptions,
-    body: mes,
+    body: bodyForAgent,
   });
 
   // Inject accumulated group chat history into the body for context
@@ -856,6 +868,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     Body: combinedBody,
     RawBody: event.rawMes ?? mes,
     CommandBody: mes,
+    BodyForAgent: bodyForAgent,
     From: fromAddress,
     To: toAddress,
     SessionKey: route.sessionKey,
@@ -906,7 +919,11 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
         recordPendingHistoryEntryIfEnabled({
           historyMap: chatHistories,
           historyKey: groupIdStr,
-          entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+          entry: {
+            sender: senderName || fromuser,
+            body: bodyForAgent,
+            timestamp: Date.now(),
+          },
           limit: DEFAULT_GROUP_HISTORY_LIMIT,
         });
       }
@@ -943,7 +960,11 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
             recordPendingHistoryEntryIfEnabled({
               historyMap: chatHistories,
               historyKey: groupIdStr,
-              entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+              entry: {
+                sender: senderName || fromuser,
+                body: bodyForAgent,
+                timestamp: Date.now(),
+              },
               limit: DEFAULT_GROUP_HISTORY_LIMIT,
             });
           }
@@ -995,7 +1016,11 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
             recordPendingHistoryEntryIfEnabled({
               historyMap: chatHistories,
               historyKey: groupIdStr,
-              entry: { sender: senderName || fromuser, body: mes, timestamp: Date.now() },
+              entry: {
+                sender: senderName || fromuser,
+                body: bodyForAgent,
+                timestamp: Date.now(),
+              },
               limit: DEFAULT_GROUP_HISTORY_LIMIT,
             });
           }
@@ -1066,7 +1091,7 @@ export async function handleInfoflowMessage(params: HandleInfoflowMessageParams)
     mentionIds: isGroup ? event.mentionIds : undefined,
     // Pass inbound messageId for outbound reply-to (group only)
     replyToMessageId: isGroup ? event.messageId : undefined,
-    replyToPreview: isGroup ? mes : undefined,
+    replyToPreview: isGroup ? bodyForAgent : undefined,
     mediaLocalRoots: getAgentScopedMediaLocalRoots(cfg, route.agentId),
   });
 

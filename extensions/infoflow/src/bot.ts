@@ -349,11 +349,23 @@ function buildFollowUpPrompt(isReplyToBot: boolean): string {
 
 /**
  * Build a GroupSystemPrompt for follow-up messages that @mention another person or bot.
- * Uses the conservative ReplyJudgmentRules since the message is likely directed at someone else.
+ * Instructs the model to disambiguate: is the message addressed to the @mentions or directed at you?
+ * Then applies reply/no-reply rules by priority.
  */
 function buildFollowUpOtherMentionedPrompt(): string {
   return [
-    "You recently replied in this group. A new message has arrived, but it @mentions another person or bot — it is likely directed at them, not at you.",
+    "You recently replied in this group. A new message has arrived, but it @mentions another person or bot.",
+    "Analyze the semantics: is the message **addressed to** the @mentioned person/bot, or does it only **mention** them while the sentence is actually **directed at you**?",
+    "Follow the priority rules below **in order** to decide whether to reply.",
+    "",
+    "# Priority 1: Message directed at you → MUST reply",
+    "",
+    "If the message only mentions the other person/bot but the whole sentence is directed at you, and the sender shows intent to converse with you, you **MUST** reply (do NOT output NO_REPLY).",
+    "",
+    "# Priority 2: Message addressed to the @mentions → prefer NO_REPLY",
+    "",
+    "If the message is addressed to the @mentioned person/bot, prefer no reply: output only NO_REPLY.",
+    "**Exception**: If it is the same topic as your previous conversation with the group **and** you determine their suggested approach or method has an obvious error or directional mistake, you may reply to prevent the wrong method from being followed.",
     "",
     buildReplyJudgmentRules(),
   ].join("\n");
